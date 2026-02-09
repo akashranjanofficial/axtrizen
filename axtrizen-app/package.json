@@ -1,0 +1,19 @@
+{
+  "name": "axtrizen-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Axtrizen AI - Multi-Agent Orchestration Platform",
+  "scripts": {
+    "build": "npm run tauri build",
+    "dev": "npm run tauri dev",
+    "frontend:build": "cd ../axtrizenFrontEnd && npm run build",
+    "frontend:dev": "cd ../axtrizenFrontEnd && npm run dev",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

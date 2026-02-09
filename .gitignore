@@ -37,6 +37,12 @@ apps/ios/Clawdbot.xcodeproj/**
 apps/macos/.build/**
 **/*.bun-build
 apps/ios/*.xcfilelist
+# Tauri / Rust specific
+/axtrizen-app/src-tauri/target
+/axtrizen-app/src-tauri/gen/
+/axtrizen-app/target
+**/target/
+facts
 
 # Vendor build artifacts
 vendor/a2ui/renderers/lit/dist/
