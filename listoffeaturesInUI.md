@@ -1,83 +1,116 @@
-# Axtrizen AI - User Interface Features Status
+# Axtrizen AI — Feature Status Report
 
-## 🖥️ Application Shell
+## ✅ All Implemented & Working
 
-- **Window Management**: Native macOS window via Tauri 2.0
-- **Theme Support**:
-  - Dark Mode (Default, "Corona" gradient theme)
-  - Light Mode
-  - Toggle button in header
-- **Navigation Sidebar**:
-  - Collapsible/Expandable
-  - Active state indicators
-  - Sections: Dashboard, Agents, Teams, Projects, Chat, Settings
-  - Usage Stats footer (Static placeholder with 0 data)
+### 🖥️ Application Shell
 
-## 📊 Dashboard (Home)
+| Feature                 | Status  | Details                                                |
+| ----------------------- | ------- | ------------------------------------------------------ |
+| Tauri 2.0 native window | ✅ Done | macOS app with dev.sh launcher                         |
+| Dark/Light theme toggle | ✅ Done | Corona gradient dark theme default                     |
+| Collapsible sidebar     | ✅ Done | Content area adjusts margin dynamically                |
+| Sidebar navigation      | ✅ Done | Dashboard, Agents, Teams, Projects, Chat, **Settings** |
 
-- **Status**: Implemented with Empty States
-- **Features**:
-  - **Quick Stats Cards**: Agents, Cost, Memory, Projects (All zeroed out)
-  - **Activity Feed**: Shows "No activity" empty state
-  - **Agent Status Watch**: Shows "No agents running" empty state
-  - **System Status**: CPU, Memory, Network gauges (Showing 0%)
-  - **Header**: Global Search, Notifications, User Profile (UI placeholders)
+### 📊 Dashboard
 
-## 🤖 Agents View
+| Feature             | Status  | Details                                          |
+| ------------------- | ------- | ------------------------------------------------ |
+| Active Agents count | ✅ Live | Real count from `agentStore`                     |
+| Session Cost        | ✅ Live | Fetched from gateway `usage.cost` RPC            |
+| System Memory       | ✅ Live | Fetched from gateway `health` RPC with gauge bar |
+| Gateway Status      | ✅ Live | Connected/Disconnected indicator                 |
+| Gateway Uptime      | ✅ Live | Hours & minutes from `health` RPC                |
+| Gateway Version     | ✅ Live | Version string from `health` RPC                 |
+| Agent Load          | ✅ Live | Count vs max with gauge bar                      |
+| Cost Breakdown      | ✅ Live | Per-agent cost, total cost panel                 |
+| Activity Feed       | ✅ Live | `localStorage`-persisted event log               |
+| Agent Status Watch  | ✅ Live | Agents with emoji avatars and status badges      |
+| Auto-refresh (10s)  | ✅ Done | All metrics poll every 10 seconds                |
 
-- **Status**: Implemented with Real Integration
-- **Features**:
-  - **Create Agent**:
-    - Modal dialog for agent name/role
-    - **Integration**: Triggers real `Terminal.app` to run `node openclaw.mjs onboard`
-  - **Agent List**:
-    - Shows empty state "No agents running"
-  - **Agent Detail Views**:
-    - **Overview**: Task status, Token usage, Cost, Memory load (Empty/Zeroed)
-    - **Terminal**: Live log viewer (Empty state "No logs yet")
-    - **Memory**: Working/Long-term memory inspector (Empty state)
-    - **Settings**: Configuration form (UI only)
+### 🤖 Agents View
 
-## 👥 Teams View
+| Feature            | Status  | Details                                 |
+| ------------------ | ------- | --------------------------------------- |
+| Create Agent       | ✅ Live | Name + role → gateway `agents.create`   |
+| Agent List         | ✅ Live | Real agents from gateway, auto-syncs    |
+| Agent Settings     | ✅ Live | View/edit SOUL.md, IDENTITY.md, etc.    |
+| Delete Agent       | ✅ Live | Removes from gateway + optional files   |
+| Agent Status       | ✅ Live | Idle/Active/Error from `agentStore`     |
+| Agent Emoji/Avatar | ✅ Live | From gateway identity data, fallback 🤖 |
 
-- **Status**: Implemented with Empty States
-- **Features**:
-  - **Team Hierarchy**: Manager cards and reporting lines (Empty state "No Teams Yet")
-  - **Unassigned Agents**: Pool of agents without managers (Empty state)
-  - **Create Manager**: Modal dialog (UI only)
-  - **Assign Agent**: Visual assignment flow (UI only)
+### 💬 Chat Interface
 
-## 📁 Projects View
+| Feature                | Status  | Details                                |
+| ---------------------- | ------- | -------------------------------------- |
+| Agent list sidebar     | ✅ Live | Real agents with status badges + emoji |
+| Send messages          | ✅ Live | Gateway `chat.send` RPC                |
+| Receive responses      | ✅ Live | From gateway                           |
+| Chat history           | ✅ Live | Gateway transcripts, survives restarts |
+| Markdown rendering     | ✅ Done | `react-markdown` + custom CSS          |
+| Sanitize protocol tags | ✅ Done | Strips `</final>`, `</error>`, etc.    |
+| Filter tool output     | ✅ Done | Hides raw JSON from display            |
 
-- **Status**: Implemented with Empty States
-- **Features**:
-  - **Project List**: List of active projects (Empty state "No projects yet")
-  - **Create Project**: Button (UI only)
-  - **Project Search**: Filter functionality (Implemented but no data to filter)
-  - **Detail View**: Placeholder for project specifics
+### 🔍 Global Search
 
-## 💬 Chat Interface
+| Feature            | Status  | Details                                  |
+| ------------------ | ------- | ---------------------------------------- |
+| Search dropdown    | ✅ Done | Opens from header search icon            |
+| Agent search       | ✅ Live | Searches agents by name/ID               |
+| Navigate to result | ✅ Done | Clicking result navigates to Agents view |
 
-- **Status**: Implemented with Empty States
-- **Features**:
-  - **Sidebar**: Contacts & Groups list (Empty state "No contacts yet")
-  - **Message Area**: Chat history view (Empty state "No Conversations Yet")
-  - **Input**: Message composition bar (UI only)
-  - **New Chat**: Button to start conversation (UI only)
+### 🔔 Notifications
 
-## ⚙️ Settings
+| Feature                | Status  | Details                                    |
+| ---------------------- | ------- | ------------------------------------------ |
+| Notifications dropdown | ✅ Done | Shows activity events from `activityStore` |
+| Event count badge      | ✅ Done | Red dot shows when events exist            |
+| Event details          | ✅ Done | Agent name, action, timestamp              |
 
-- **Status**: ⚠️ Placeholder
-- **Note**: Clicking "Settings" currently redirects to Dashboard. Feature is planned for future sprint.
+### 👤 User Profile
 
----
+| Feature           | Status  | Details                    |
+| ----------------- | ------- | -------------------------- |
+| Profile dropdown  | ✅ Done | Name, role, settings link  |
+| Settings shortcut | ✅ Done | Navigates to Settings view |
+| Version display   | ✅ Done | Shows Axtrizen v1.0.0      |
 
-## 🔌 Backend Integration Status
+### ⚙️ Settings
 
-| Feature            | UI Status | Backend Connection | Notes                              |
-| ------------------ | --------- | ------------------ | ---------------------------------- |
-| **Terminal Spawn** | ✅ Ready  | ✅ Connected       | Opens Terminal.app successfully    |
-| **Agent List**     | ✅ Ready  | ❌ Pending         | Needs `get_agents` IPC + WebSocket |
-| **Agent Status**   | ✅ Ready  | ❌ Pending         | Needs real-time status stream      |
-| **Chat**           | ✅ Ready  | ❌ Pending         | Needs `chat.send` IPC              |
-| **Stats/Metrics**  | ✅ Ready  | ❌ Pending         | Needs `get_metrics` IPC            |
+| Feature        | Status  | Details                             |
+| -------------- | ------- | ----------------------------------- |
+| Theme toggle   | ✅ Live | Dark/Light mode selection           |
+| Gateway URL    | ✅ Live | Editable WebSocket endpoint         |
+| Auto Reconnect | ✅ Live | Toggle on/off                       |
+| OpenClaw Path  | ✅ Live | Editable installation path          |
+| Debug Mode     | ✅ Live | Toggle verbose logging              |
+| Save/Reset     | ✅ Done | Persist to SQLite via Tauri backend |
+
+### 👥 Teams View (Phase 1 & 2)
+
+| Feature            | Status  | Details                                                                   |
+| ------------------ | ------- | ------------------------------------------------------------------------- |
+| Create Team        | ✅ Live | Name, desc → SQLite `teams` table                                         |
+| Team List          | ✅ Live | Real data from local database                                             |
+| Add/Remove Members | ✅ Live | Assign agents from `agentStore` to team                                   |
+| Auto-Group Chat    | ✅ Live | Creates Group Chat Coordinator agent automatically                        |
+| @Tag Orchestration | ✅ Live | Tag specific agents in a group chat, routing requests and sharing context |
+
+### 📁 Projects View (Phase 1)
+
+| Feature              | Status  | Details                                      |
+| -------------------- | ------- | -------------------------------------------- |
+| Create Project       | ✅ Live | Name, requirements → SQLite `projects` table |
+| Workspace Generation | ✅ Live | Creates `~/.axtrizen/projects/[id]` dir      |
+| Project List         | ✅ Live | Real data from local database                |
+| Project Details      | ✅ Live | Shows phase, status, dates, ID, path         |
+| Delete Project       | ✅ Live | Removes from DB and deletes workspace dir    |
+
+### 🔌 Backend Integration
+
+| Feature             | Status     | Details                        |
+| ------------------- | ---------- | ------------------------------ |
+| Gateway WebSocket   | ✅ Live    | Protocol v3, auto-reconnect    |
+| Auth token          | ✅ Live    | Env var → config file fallback |
+| All CRUD operations | ✅ Live    | agents, sessions, settings     |
+| Health/Usage APIs   | ✅ Live    | Memory, uptime, version, cost  |
+| Mock data           | ✅ Removed | `mockData.ts` deleted          |

@@ -1,26 +1,24 @@
 import { Bot } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { agentStore, type Agent } from "../stores/agent-store";
 
-interface Agent {
-  id: string;
-  name: string;
-  role: string;
-  status: "Active" | "Idle" | "Error";
-  avatar: string;
-}
-
-// Start with empty - will be populated by real data
-const initialAgents: Agent[] = [];
-
-const statusStyles = {
-  Active: "bg-green-500/20 text-green-500 border-green-500/50",
-  Idle: "bg-yellow-500/20 text-yellow-500 border-yellow-500/50",
-  Error: "bg-red-500/20 text-red-500 border-red-500/50",
+const statusStyles: Record<string, string> = {
+  active: "bg-green-500/20 text-green-500 border-green-500/50",
+  idle: "bg-yellow-500/20 text-yellow-500 border-yellow-500/50",
+  error: "bg-red-500/20 text-red-500 border-red-500/50",
+  dormant: "bg-gray-500/20 text-gray-500 border-gray-500/50",
 };
 
 export function AgentStatusList() {
   const [hoveredAgent, setHoveredAgent] = useState<string | null>(null);
-  const agents = initialAgents;
+  const [agents, setAgents] = useState<Agent[]>(agentStore.getAgents());
+
+  useEffect(() => {
+    const unsub = agentStore.subscribe(() => {
+      setAgents(agentStore.getAgents());
+    });
+    return unsub;
+  }, []);
 
   return (
     <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-xl p-6">
@@ -62,7 +60,7 @@ export function AgentStatusList() {
                   <span
                     className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${statusStyles[agent.status]}`}
                   >
-                    {agent.status}
+                    {agent.status.charAt(0).toUpperCase() + agent.status.slice(1)}
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground truncate">{agent.role}</p>

@@ -16,6 +16,7 @@ export type AgentSummary = {
   id: string;
   name?: string;
   identityName?: string;
+  identityType?: string;
   identityEmoji?: string;
   identitySource?: "identity" | "config";
   workspace: string;
@@ -108,6 +109,7 @@ export function buildAgentSummaries(cfg: OpenClawConfig): AgentSummary[] {
       (agent) => normalizeAgentId(agent.id) === id,
     )?.identity;
     const identityName = identity?.name ?? configIdentity?.name?.trim();
+    const identityType = identity?.type;
     const identityEmoji = identity?.emoji ?? configIdentity?.emoji?.trim();
     const identitySource = identity
       ? "identity"
@@ -118,6 +120,7 @@ export function buildAgentSummaries(cfg: OpenClawConfig): AgentSummary[] {
       id,
       name: resolveAgentName(cfg, id),
       identityName,
+      identityType,
       identityEmoji,
       identitySource,
       workspace,

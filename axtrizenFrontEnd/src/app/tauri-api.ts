@@ -28,6 +28,7 @@ export interface Agent {
   status: "active" | "idle" | "dormant" | "error";
   model?: string;
   workspace?: string;
+  type?: string;
 }
 
 export interface AgentStatus {
@@ -140,8 +141,37 @@ export async function getAgents(): Promise<Agent[]> {
 /**
  * Get status of a specific agent
  */
+/**
+ * Get status of a specific agent
+ */
 export async function getAgentStatus(agentId: string): Promise<AgentStatus> {
   return invoke<AgentStatus>("get_agent_status", { agentId });
+}
+
+/**
+ * Delete an agent
+ */
+export async function deleteAgent(agentId: string): Promise<void> {
+  return invoke<void>("delete_agent", { agentId, deleteFiles: true });
+}
+
+/**
+ * Create a new agent
+ */
+export async function createAgent(
+  name: string,
+  role: string,
+  workingDir: string,
+  agentType: "worker" | "manager",
+): Promise<any> {
+  return invoke<any>("create_agent", { name, role, workingDir, agentType });
+}
+
+/**
+ * Stop an agent (kill its PTY session)
+ */
+export async function stopAgent(agentId: string): Promise<void> {
+  return invoke<void>("kill_pty", { id: agentId });
 }
 
 // ==================== Config Commands ====================
@@ -161,6 +191,20 @@ export async function getGatewayToken(): Promise<string | null> {
 }
 
 /**
+ * Get generic agent configuration from a specific path
+ */
+export async function getAgentConfig(path: string): Promise<any> {
+  return invoke<any>("get_agent_config", { path });
+}
+
+/**
+ * Save generic agent configuration to a specific path
+ */
+export async function saveAgentConfig(path: string, config: any): Promise<void> {
+  return invoke<void>("save_agent_config", { path, config });
+}
+
+/**
  * Get full OpenClaw configuration
  */
 export async function getOpenClawConfig(): Promise<OpenClawConfig | null> {
@@ -176,11 +220,35 @@ export async function ping(): Promise<string> {
   return invoke<string>("ping");
 }
 
+// ==================== Gateway Connection ====================
+
+/**
+ * Connect to the OpenClaw Gateway
+ */
+export async function connectToGateway(url?: string, token?: string): Promise<boolean> {
+  return invoke<boolean>("gateway_connect", { url, token });
+}
+
+/**
+ * Disconnect from the OpenClaw Gateway
+ */
+export async function disconnectGateway(): Promise<void> {
+  return invoke<void>("gateway_disconnect");
+}
+
+/**
+ * Check if connected to the OpenClaw Gateway
+ */
+export async function isGatewayConnected(): Promise<boolean> {
+  return invoke<boolean>("gateway_is_connected");
+}
+
 // ==================== Settings Commands ====================
 
 export interface AppSettings {
   theme: string;
   gateway_url: string;
+  openclaw_path: string;
   debug_mode: boolean;
   auto_reconnect: boolean;
   window_width?: number;
@@ -220,4 +288,87 @@ export async function toggleDebugMode(): Promise<boolean> {
  */
 export async function isDebugMode(): Promise<boolean> {
   return invoke<boolean>("is_debug_mode");
+}
+
+// ==================== Project Commands ====================
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  team_id: string | null;
+  status: string;
+  phase: string;
+  workspace_path: string | null;
+  created_at: string;
+}
+
+export async function getProjects(): Promise<Project[]> {
+  return invoke<Project[]>("get_projects");
+}
+
+export async function createProject(
+  name: string,
+  description: string | null,
+  team_id: string | null = null,
+): Promise<Project> {
+  return invoke<Project>("create_project", { name, description, team_id });
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  return invoke<void>("delete_project", { id });
+}
+
+// ==================== Team Commands ====================
+
+export interface Team {
+  id: string;
+  name: string;
+  description: string | null;
+  manager_id: string | null;
+  created_at: string;
+}
+
+export interface TeamMember {
+  team_id: string;
+  agent_id: string;
+  manager_id: string | null;
+  joined_at: string;
+}
+
+export async function getTeams(): Promise<Team[]> {
+  return invoke<Team[]>("get_teams");
+}
+
+export async function createTeam(
+  name: string,
+  description: string | null,
+  managerId: string | null,
+): Promise<Team> {
+  return invoke<Team>("create_team", { name, description, managerId });
+}
+
+export async function deleteTeam(id: string): Promise<void> {
+  return invoke<void>("delete_team", { id });
+}
+
+export async function updateTeam(
+  id: string,
+  name: string,
+  description: string | null,
+  managerId: string | null,
+): Promise<Team> {
+  return invoke<Team>("update_team", { id, name, description, managerId });
+}
+
+export async function getTeamMembers(teamId: string): Promise<TeamMember[]> {
+  return invoke<TeamMember[]>("get_team_members", { teamId });
+}
+
+export async function addTeamMember(teamId: string, agentId: string): Promise<void> {
+  return invoke<void>("add_team_member", { teamId, agentId });
+}
+
+export async function removeTeamMember(teamId: string, agentId: string): Promise<void> {
+  return invoke<void>("remove_team_member", { teamId, agentId });
 }

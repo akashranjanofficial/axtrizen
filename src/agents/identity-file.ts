@@ -9,6 +9,7 @@ export type AgentIdentityFile = {
   creature?: string;
   vibe?: string;
   avatar?: string;
+  type?: string;
 };
 
 const IDENTITY_PLACEHOLDER_VALUES = new Set([
@@ -58,6 +59,9 @@ export function parseIdentityMarkdown(content: string): AgentIdentityFile {
     if (label === "name") {
       identity.name = value;
     }
+    if (label === "type") {
+      identity.type = value;
+    }
     if (label === "emoji") {
       identity.emoji = value;
     }
@@ -80,6 +84,7 @@ export function parseIdentityMarkdown(content: string): AgentIdentityFile {
 export function identityHasValues(identity: AgentIdentityFile): boolean {
   return Boolean(
     identity.name ||
+    identity.type ||
     identity.emoji ||
     identity.theme ||
     identity.creature ||

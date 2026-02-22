@@ -22,12 +22,19 @@ pub struct AuthConfig {
     pub token: Option<String>,
 }
 
-/// Get the gateway token from ~/.openclaw/openclaw.json
+/// Get the gateway token, checking env var first then ~/.openclaw/openclaw.json
 /// 
-/// This is automatically read from the OpenClaw config file
-/// Created during the onboarding process via spawn-agent.sh
+/// Priority: OPENCLAW_GATEWAY_TOKEN env var > config file token
+/// This ensures the browser-side client uses the same token as dev.sh
 #[tauri::command]
 pub async fn get_gateway_token() -> Result<Option<String>, String> {
+    // 1. Check OPENCLAW_GATEWAY_TOKEN env var (set by dev.sh)
+    if let Ok(env_token) = std::env::var("OPENCLAW_GATEWAY_TOKEN") {
+        if !env_token.is_empty() {
+            return Ok(Some(env_token));
+        }
+    }
+    // 2. Fall back to ~/.openclaw/openclaw.json
     let config = read_openclaw_config()?;
     
     Ok(config
@@ -70,6 +77,41 @@ fn get_openclaw_config_path() -> Result<PathBuf, String> {
 /// Check if OpenClaw is configured (has been onboarded)
 #[tauri::command]
 pub async fn is_openclaw_configured() -> Result<bool, String> {
-    let config_path = get_openclaw_config_path()?;
-    Ok(config_path.exists())
+    let config_path = get_openclaw_config_path();
+    match config_path {
+        Ok(path) => Ok(path.exists()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Get the configuration from a specific agent path (openclaw.json)
+#[tauri::command]
+pub async fn get_agent_config(path: String) -> Result<serde_json::Value, String> {
+    let config_path = PathBuf::from(path).join("openclaw.json");
+    
+    if !config_path.exists() {
+        return Err("Config file not found".to_string());
+    }
+    
+    let content = fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read config file: {}", e))?;
+    
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse config file: {}", e))?;
+    
+    Ok(config)
+}
+
+/// Save the configuration to a specific agent path (openclaw.json)
+#[tauri::command]
+pub async fn save_agent_config(path: String, config: serde_json::Value) -> Result<(), String> {
+    let config_path = PathBuf::from(path).join("openclaw.json");
+    
+    let content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        
+    fs::write(&config_path, content)
+        .map_err(|e| format!("Failed to write config file: {}", e))?;
+        
+    Ok(())
 }

@@ -2,12 +2,12 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { createPty, writePty, resizePty } from "../tauri-api";
-// Removed broken import: import { listen } from '@tauri-apps/api/event';
 import "xterm/css/xterm.css";
 
 interface TerminalComponentProps {
   id: string; // Agent ID or unique session ID
   className?: string;
+  visible?: boolean; // When false, terminal is hidden but NOT unmounted
 }
 
 interface PtyOutput {
@@ -15,7 +15,10 @@ interface PtyOutput {
   data: string;
 }
 
-export function TerminalComponent({ id, className }: TerminalComponentProps) {
+// Global registry of active PTY sessions to prevent re-creation
+const activePtySessions = new Set<string>();
+
+export function TerminalComponent({ id, className, visible = true }: TerminalComponentProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -36,7 +39,7 @@ export function TerminalComponent({ id, className }: TerminalComponentProps) {
         background: "#1e1e1e",
         foreground: "#ffffff",
       },
-      convertEol: true, // Needed for proper line endings
+      convertEol: true,
     });
 
     const fitAddon = new FitAddon();
@@ -54,11 +57,9 @@ export function TerminalComponent({ id, className }: TerminalComponentProps) {
       writePty(id, data).catch(console.error);
     });
 
-    // Listen for PTY output
-    // Use global Tauri object to avoid import issues causing white screen
+    // Listen for PTY output and create session
     const initSession = async () => {
       try {
-        // 1. Setup listener
         let unlisten: () => void = () => {};
 
         if (window.__TAURI__?.event) {
@@ -67,22 +68,20 @@ export function TerminalComponent({ id, className }: TerminalComponentProps) {
               term.write(event.payload.data);
             }
           });
-        } else if (window.__TAURI__ && (window as any).__TAURI__.listening) {
-          // Fallback for some v1 setups
-          unlisten = await (window as any).__TAURI__.listening("pty-output", (event: any) => {
-            if (event.payload.id === id) {
-              term.write(event.payload.data);
-            }
-          });
         } else {
           console.warn("Tauri event system not found");
         }
 
-        // 2. Create backend PTY session
-        await createPty(id);
-        console.log(`PTY session ${id} created`);
-        term.writeln("\x1b[32mTargeting system...\x1b[0m");
-        term.writeln("Connecting to local agent shell...");
+        // Only create PTY if one doesn't already exist for this id
+        if (!activePtySessions.has(id)) {
+          await createPty(id);
+          activePtySessions.add(id);
+          console.log(`PTY session ${id} created`);
+          term.writeln("\x1b[32mTargeting system...\x1b[0m");
+          term.writeln("Connecting to local agent shell...");
+        } else {
+          console.log(`PTY session ${id} already exists, reusing`);
+        }
 
         return unlisten;
       } catch (err) {
@@ -108,17 +107,31 @@ export function TerminalComponent({ id, className }: TerminalComponentProps) {
     };
 
     window.addEventListener("resize", handleResize);
-    // Initial fit after mount
     setTimeout(handleResize, 100);
 
-    // Cleanup
+    // Cleanup — only runs when component truly unmounts (agent deleted)
     return () => {
       window.removeEventListener("resize", handleResize);
       sessionPromise.then((unlisten) => unlisten());
       term.dispose();
       initializedRef.current = false;
+      // Note: we do NOT remove from activePtySessions here;
+      // that's handled by killPtySession() when deleting an agent
     };
   }, [id]);
+
+  // Refit when becoming visible
+  useEffect(() => {
+    if (visible && fitAddonRef.current) {
+      setTimeout(() => {
+        try {
+          fitAddonRef.current?.fit();
+        } catch (e) {
+          // ignore
+        }
+      }, 50);
+    }
+  }, [visible]);
 
   return (
     <div
@@ -126,4 +139,11 @@ export function TerminalComponent({ id, className }: TerminalComponentProps) {
       ref={terminalRef}
     />
   );
+}
+
+/**
+ * Call this when an agent is deleted to clean up its PTY session tracking
+ */
+export function killPtySession(id: string) {
+  activePtySessions.delete(id);
 }

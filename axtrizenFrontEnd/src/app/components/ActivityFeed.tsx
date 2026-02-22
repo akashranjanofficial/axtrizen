@@ -1,16 +1,6 @@
 import { Filter, Clock } from "lucide-react";
-
-interface ActivityItem {
-  id: string;
-  agent: string;
-  action: string;
-  timestamp: string;
-  status: "success" | "error" | "pending";
-  role: "Dev" | "QA" | "Design";
-}
-
-// Start with empty - will be populated by real data
-const initialActivities: ActivityItem[] = [];
+import { useState, useEffect } from "react";
+import { activityStore, type ActivityEvent } from "../stores/activity-store";
 
 const roleColors = {
   Dev: "bg-blue-500/20 text-blue-400 border-blue-500/30",
@@ -19,7 +9,14 @@ const roleColors = {
 };
 
 export function ActivityFeed() {
-  const activities = initialActivities;
+  const [activities, setActivities] = useState<ActivityEvent[]>(activityStore.getEvents());
+
+  useEffect(() => {
+    const unsub = activityStore.subscribe(() => {
+      setActivities(activityStore.getEvents());
+    });
+    return unsub;
+  }, []);
 
   return (
     <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-xl p-6">

@@ -240,12 +240,31 @@ export const agentsHandlers: GatewayRequestHandlers = {
 
     // Always write Name to IDENTITY.md; optionally include emoji/avatar.
     const safeName = sanitizeIdentityLine(rawName);
+    const identityPath = path.join(workspaceDir, DEFAULT_IDENTITY_FILENAME);
+    const soulPath = path.join(workspaceDir, DEFAULT_SOUL_FILENAME);
+    const bootstrapPath = path.join(workspaceDir, DEFAULT_BOOTSTRAP_FILENAME);
+
+    const role = resolveOptionalStringParam(params.role);
     const emoji = resolveOptionalStringParam(params.emoji);
     const avatar = resolveOptionalStringParam(params.avatar);
-    const identityPath = path.join(workspaceDir, DEFAULT_IDENTITY_FILENAME);
+    const agentType = resolveOptionalStringParam(params.agentType) || "worker";
+
+    // If role provided, write it to SOUL.md and delete BOOTSTRAP.md (skip onboarding)
+    if (role && soulPath) {
+      await fs.writeFile(soulPath, role, "utf-8");
+      if (bootstrapPath) {
+        try {
+          await fs.unlink(bootstrapPath);
+        } catch (e) {
+          // ignore if missing
+        }
+      }
+    }
+
     const lines = [
       "",
       `- Name: ${safeName}`,
+      `- Type: ${agentType.toLowerCase()}`,
       ...(emoji ? [`- Emoji: ${sanitizeIdentityLine(emoji)}`] : []),
       ...(avatar ? [`- Avatar: ${sanitizeIdentityLine(avatar)}`] : []),
       "",
@@ -338,22 +357,37 @@ export const agentsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    if (findAgentEntryIndex(listAgentEntries(cfg), agentId) < 0) {
+
+    // Check if agent exists in config
+    const inConfig = findAgentEntryIndex(listAgentEntries(cfg), agentId) >= 0;
+
+    // If not in config, we still proceed to delete files (Best Effort for zombies)
+    // We only error if it's NOT in config AND we are NOT deleting files (because then there's nothing to do)
+    const deleteFiles = typeof params.deleteFiles === "boolean" ? params.deleteFiles : true;
+
+    if (!inConfig && !deleteFiles) {
       respond(
         false,
         undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `agent "${agentId}" not found`),
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `agent "${agentId}" not found in config and deleteFiles=false`,
+        ),
       );
       return;
     }
 
-    const deleteFiles = typeof params.deleteFiles === "boolean" ? params.deleteFiles : true;
     const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId);
     const agentDir = resolveAgentDir(cfg, agentId);
     const sessionsDir = resolveSessionTranscriptsDirForAgent(agentId);
 
-    const result = pruneAgentConfig(cfg, agentId);
-    await writeConfigFile(result.config);
+    let removedBindings = 0;
+
+    if (inConfig) {
+      const result = pruneAgentConfig(cfg, agentId);
+      await writeConfigFile(result.config);
+      removedBindings = result.removedBindings;
+    }
 
     if (deleteFiles) {
       await Promise.all([
@@ -363,7 +397,7 @@ export const agentsHandlers: GatewayRequestHandlers = {
       ]);
     }
 
-    respond(true, { ok: true, agentId, removedBindings: result.removedBindings }, undefined);
+    respond(true, { ok: true, agentId, removedBindings }, undefined);
   },
   "agents.files.list": async ({ params, respond }) => {
     if (!validateAgentsFilesListParams(params)) {

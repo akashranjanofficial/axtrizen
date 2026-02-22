@@ -48,8 +48,10 @@ export const AgentsCreateParamsSchema = Type.Object(
   {
     name: NonEmptyString,
     workspace: NonEmptyString,
+    role: Type.Optional(Type.String()),
     emoji: Type.Optional(Type.String()),
     avatar: Type.Optional(Type.String()),
+    agentType: Type.Optional(Type.Union([Type.Literal("worker"), Type.Literal("manager")])),
   },
   { additionalProperties: false },
 );

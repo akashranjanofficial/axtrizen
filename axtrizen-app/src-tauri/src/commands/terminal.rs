@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tauri::{AppHandle, Emitter, Manager, Window};
+use tauri::{Emitter, Window};
 
 // State to manage multiple PTY sessions (one per agent or tab)
 // We wrap the writer in Arc<Mutex> to share it between threads/commands
@@ -35,6 +35,11 @@ pub async fn create_pty(
     window: Window,
     state: tauri::State<'_, PtyState>,
 ) -> Result<(), String> {
+    // 0. Check if PTY already exists
+    if state.ptys.lock().unwrap().contains_key(&id) {
+        return Ok(());
+    }
+
     // 1. Setup PTY system
     let pty_system = NativePtySystem::default();
     let size = PtySize {
@@ -65,7 +70,7 @@ pub async fn create_pty(
         .map_err(|e| format!("Failed to spawn command: {}", e))?;
         
     // 5. Store writer
-    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     
     // 6. Spawn reader thread
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -94,6 +99,20 @@ pub async fn create_pty(
     Ok(())
 }
 
+/// Kills the PTY session for the given ID
+#[tauri::command]
+pub async fn kill_pty(
+    id: String,
+    state: tauri::State<'_, PtyState>,
+) -> Result<(), String> {
+    let mut ptys = state.ptys.lock().unwrap();
+    if ptys.remove(&id).is_some() {
+        Ok(())
+    } else {
+        Err("PTY session not found".to_string())
+    }
+}
+
 /// Write data (input) to the PTY
 #[tauri::command]
 pub async fn write_pty(
@@ -111,9 +130,9 @@ pub async fn write_pty(
 /// Resize the PTY
 #[tauri::command]
 pub async fn resize_pty(
-    id: String,
-    rows: u16,
-    cols: u16,
+    _id: String,
+    _rows: u16,
+    _cols: u16,
     // state: tauri::State<'_, PtyState>, // Note: resizing usually requires original pair or master, currently portable-pty resizing is on master.
     // Simplifying: portable-pty 0.8+ allows resizing on MasterPty. 
     // But we only stored writer. We need to store MasterPty to resize.
@@ -126,7 +145,7 @@ pub async fn resize_pty(
 
 // Keep old commands for backward compatibility or direct spawning if needed
 #[tauri::command]
-pub async fn spawn_agent(agent_name: String) -> Result<String, String> {
+pub async fn spawn_agent(_agent_name: String) -> Result<String, String> {
     // ... logic to call create_pty internally? 
     // Actually, handling this via frontend calling create_pty is better.
     // We'll keep this as a stub or legacy.

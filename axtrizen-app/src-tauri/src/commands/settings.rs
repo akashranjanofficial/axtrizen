@@ -8,6 +8,7 @@ use super::super::db;
 pub struct AppSettings {
     pub theme: String,
     pub gateway_url: String,
+    pub openclaw_path: String,
     pub debug_mode: bool,
     pub auto_reconnect: bool,
     pub window_width: Option<i32>,
@@ -16,9 +17,13 @@ pub struct AppSettings {
 
 impl Default for AppSettings {
     fn default() -> Self {
+        let default_openclaw = dirs::home_dir()
+            .map(|h| h.join("Desktop").join("openclaw").to_string_lossy().to_string())
+            .unwrap_or_else(|| "~/Desktop/openclaw".to_string());
         Self {
             theme: "dark".to_string(),
             gateway_url: "ws://127.0.0.1:18789".to_string(),
+            openclaw_path: default_openclaw,
             debug_mode: false,
             auto_reconnect: true,
             window_width: None,
@@ -33,9 +38,11 @@ pub async fn get_settings() -> Result<AppSettings, String> {
     let conn = db::init_db().map_err(|e| e.to_string())?;
     let settings_map = db::get_all_settings(&conn).map_err(|e| e.to_string())?;
     
+    let default_settings = AppSettings::default();
     Ok(AppSettings {
         theme: settings_map.get("theme").cloned().unwrap_or_else(|| "dark".to_string()),
         gateway_url: settings_map.get("gateway_url").cloned().unwrap_or_else(|| "ws://127.0.0.1:18789".to_string()),
+        openclaw_path: settings_map.get("openclaw_path").cloned().unwrap_or(default_settings.openclaw_path),
         debug_mode: settings_map.get("debug_mode").map(|v| v == "true").unwrap_or(false),
         auto_reconnect: settings_map.get("auto_reconnect").map(|v| v == "true").unwrap_or(true),
         window_width: settings_map.get("window_width").and_then(|v| v.parse().ok()),
@@ -57,6 +64,7 @@ pub async fn update_settings(settings: AppSettings) -> Result<(), String> {
     
     db::set_setting(&conn, "theme", &settings.theme).map_err(|e| e.to_string())?;
     db::set_setting(&conn, "gateway_url", &settings.gateway_url).map_err(|e| e.to_string())?;
+    db::set_setting(&conn, "openclaw_path", &settings.openclaw_path).map_err(|e| e.to_string())?;
     db::set_setting(&conn, "debug_mode", &settings.debug_mode.to_string()).map_err(|e| e.to_string())?;
     db::set_setting(&conn, "auto_reconnect", &settings.auto_reconnect.to_string()).map_err(|e| e.to_string())?;
     

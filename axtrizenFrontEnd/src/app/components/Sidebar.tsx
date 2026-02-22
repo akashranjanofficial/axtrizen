@@ -7,7 +7,6 @@ import {
   Settings,
   ChevronLeft,
 } from "lucide-react";
-import { useState } from "react";
 
 interface MenuItem {
   id: string;
@@ -27,11 +26,11 @@ const menuItems: MenuItem[] = [
 interface SidebarProps {
   activeMenu: string;
   onMenuChange: (menuId: string) => void;
+  isCollapsed: boolean;
+  onCollapseToggle: () => void;
 }
 
-export function Sidebar({ activeMenu, onMenuChange }: SidebarProps) {
-  const [isCollapsed, setIsCollapsed] = useState(false);
-
+export function Sidebar({ activeMenu, onMenuChange, isCollapsed, onCollapseToggle }: SidebarProps) {
   return (
     <aside
       className={`fixed left-0 top-0 z-20 h-screen border-r border-border bg-card/50 backdrop-blur-xl transition-all duration-300 ${
@@ -69,6 +68,7 @@ export function Sidebar({ activeMenu, onMenuChange }: SidebarProps) {
               <li key={item.id}>
                 <button
                   onClick={() => onMenuChange(item.id)}
+                  data-testid={`nav-${item.id}`}
                   className={`group relative flex w-full items-center gap-3 rounded-xl px-4 py-3 transition-all duration-200 ${
                     isActive
                       ? "bg-primary/10 border border-primary/50 text-primary shadow-[0_0_20px_rgba(175,23,99,0.2)]"
@@ -98,7 +98,7 @@ export function Sidebar({ activeMenu, onMenuChange }: SidebarProps) {
       {/* Collapse Toggle Button */}
       <div className="absolute bottom-6 left-0 right-0 px-4">
         <button
-          onClick={() => setIsCollapsed(!isCollapsed)}
+          onClick={onCollapseToggle}
           className="flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-muted-foreground transition-all hover:border-primary/50 hover:bg-muted hover:text-foreground"
         >
           <ChevronLeft

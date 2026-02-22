@@ -83,15 +83,14 @@ fn get_migrations() -> Vec<(i32, &'static str)> {
             );
             
             -- Team members (many-to-many)
+            -- agent_id references Gateway-managed agents (no local agents table)
             CREATE TABLE team_members (
                 team_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 manager_id TEXT,
                 joined_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (team_id, agent_id),
-                FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
-                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-                FOREIGN KEY (manager_id) REFERENCES agents(id) ON DELETE SET NULL
+                FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
             );
             
             -- Projects table
@@ -153,6 +152,10 @@ fn get_migrations() -> Vec<(i32, &'static str)> {
             CREATE INDEX idx_messages_from ON messages(from_agent_id);
             CREATE INDEX idx_activity_agent ON agent_activity(agent_id);
             CREATE INDEX idx_activity_created ON agent_activity(created_at);
+        "#),
+        (2, r#"
+            -- Add Manager ID to teams
+            ALTER TABLE teams ADD COLUMN manager_id TEXT;
         "#),
     ]
 }
@@ -221,6 +224,169 @@ pub fn update_agent_status(conn: &Connection, id: &str, status: &str) -> SqliteR
 /// Delete an agent
 pub fn delete_agent(conn: &Connection, id: &str) -> SqliteResult<()> {
     conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ==================== Project CRUD ====================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbProject {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub team_id: Option<String>,
+    pub status: String,
+    pub phase: String,
+    pub workspace_path: Option<String>,
+    pub created_at: String,
+}
+
+/// Get all projects from database
+pub fn get_all_projects(conn: &Connection) -> SqliteResult<Vec<DbProject>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, team_id, status, phase, workspace_path, created_at 
+         FROM projects ORDER BY created_at DESC"
+    )?;
+    
+    let projects = stmt.query_map([], |row| {
+        Ok(DbProject {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            team_id: row.get(3)?,
+            status: row.get(4)?,
+            phase: row.get(5)?,
+            workspace_path: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+    
+    projects.collect()
+}
+
+/// Insert a new project
+pub fn insert_project(conn: &Connection, project: &DbProject) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO projects (id, name, description, team_id, status, phase, workspace_path) 
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (
+            &project.id,
+            &project.name,
+            &project.description,
+            &project.team_id,
+            &project.status,
+            &project.phase,
+            &project.workspace_path,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Delete a project
+pub fn delete_project(conn: &Connection, id: &str) -> SqliteResult<()> {
+    conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ==================== Team CRUD ====================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbTeam {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub manager_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbTeamMember {
+    pub team_id: String,
+    pub agent_id: String,
+    pub manager_id: Option<String>,
+    pub joined_at: String,
+}
+
+/// Get all teams from database
+pub fn get_all_teams(conn: &Connection) -> SqliteResult<Vec<DbTeam>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, manager_id, created_at 
+         FROM teams ORDER BY created_at DESC"
+    )?;
+    
+    let teams = stmt.query_map([], |row| {
+        Ok(DbTeam {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            manager_id: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    })?;
+    
+    teams.collect()
+}
+
+/// Insert a new team
+pub fn insert_team(conn: &Connection, team: &DbTeam) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT INTO teams (id, name, description, manager_id) 
+         VALUES (?1, ?2, ?3, ?4)",
+        (&team.id, &team.name, &team.description, &team.manager_id),
+    )?;
+    Ok(())
+}
+
+/// Delete a team
+pub fn delete_team(conn: &Connection, id: &str) -> SqliteResult<()> {
+    conn.execute("DELETE FROM teams WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Update a team's name and description and manager
+pub fn update_team(conn: &Connection, id: &str, name: &str, description: Option<&str>, manager_id: Option<&str>) -> SqliteResult<()> {
+    conn.execute(
+        "UPDATE teams SET name = ?1, description = ?2, manager_id = ?3 WHERE id = ?4",
+        rusqlite::params![name, description, manager_id, id],
+    )?;
+    Ok(())
+}
+
+/// Get members of a team
+pub fn get_team_members(conn: &Connection, team_id: &str) -> SqliteResult<Vec<DbTeamMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT team_id, agent_id, manager_id, joined_at 
+         FROM team_members WHERE team_id = ?1 ORDER BY joined_at ASC"
+    )?;
+    
+    let members = stmt.query_map([team_id], |row| {
+        Ok(DbTeamMember {
+            team_id: row.get(0)?,
+            agent_id: row.get(1)?,
+            manager_id: row.get(2)?,
+            joined_at: row.get(3)?,
+        })
+    })?;
+    
+    members.collect()
+}
+
+/// Add an agent to a team
+pub fn insert_team_member(conn: &Connection, member: &DbTeamMember) -> SqliteResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO team_members (team_id, agent_id, manager_id) 
+         VALUES (?1, ?2, ?3)",
+        (&member.team_id, &member.agent_id, &member.manager_id),
+    )?;
+    Ok(())
+}
+
+/// Remove an agent from a team
+pub fn delete_team_member(conn: &Connection, team_id: &str, agent_id: &str) -> SqliteResult<()> {
+    conn.execute(
+        "DELETE FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+        (team_id, agent_id),
+    )?;
     Ok(())
 }
 

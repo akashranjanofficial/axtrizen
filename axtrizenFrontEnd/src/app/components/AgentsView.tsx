@@ -10,28 +10,17 @@ import {
   X,
   Bot,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { activityStore } from "../stores/activity-store";
+import { agentStore, type Agent } from "../stores/agent-store";
 import { spawnAgent as tauriSpawnAgent, isTauri } from "../tauri-api";
 import { AgentMemory } from "./agents/AgentMemory";
 import { AgentOverview } from "./agents/AgentOverview";
 import { AgentSettings } from "./agents/AgentSettings";
-import { AgentTerminal } from "./agents/AgentTerminal";
+import { AgentTerminal, clearAgentOnboarding } from "./agents/AgentTerminal";
+import { killPtySession } from "./TerminalComponent";
 
-export interface Agent {
-  id: string;
-  name: string;
-  role: string;
-  avatar: string;
-  status: "active" | "idle" | "error";
-  model: string;
-  currentTask: string;
-  tokenUsage: number;
-  cost: number;
-  memoryLoad: number;
-}
-
-// Start with empty agents - user will create them
-const initialAgents: Agent[] = [];
+export type { Agent } from "../stores/agent-store";
 
 const statusStyles = {
   active: {
@@ -46,6 +35,10 @@ const statusStyles = {
     dot: "bg-red-500",
     badge: "bg-red-500/20 text-red-400 border-red-500/50",
   },
+  dormant: {
+    dot: "bg-slate-500",
+    badge: "bg-slate-500/20 text-slate-400 border-slate-500/50",
+  },
 };
 
 // Create Agent Modal
@@ -54,19 +47,27 @@ function CreateAgentModal({
   onInitialize,
 }: {
   onClose: () => void;
-  onInitialize: (name: string, role: string) => void;
+  onInitialize: (
+    name: string,
+    role: string,
+    workingDir: string,
+    type: "worker" | "manager",
+    acceptedRisk: boolean,
+  ) => void;
 }) {
   const [folderPath, setFolderPath] = useState("");
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
+  const [type, setType] = useState<"worker" | "manager">("worker");
+  const [acceptedRisk, setAcceptedRisk] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
 
   const handleInitialize = async () => {
-    if (!name.trim()) {
+    if (!name.trim() || !folderPath.trim() || !acceptedRisk) {
       return;
     }
     setIsInitializing(true);
-    await onInitialize(name, role);
+    await onInitialize(name, role, folderPath, type, acceptedRisk);
     setIsInitializing(false);
   };
 
@@ -95,6 +96,18 @@ function CreateAgentModal({
           </div>
 
           <div>
+            <label className="block text-sm text-muted-foreground mb-1">Agent Type</label>
+            <select
+              value={type}
+              onChange={(e) => setType(e.target.value as "worker" | "manager")}
+              className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-primary"
+            >
+              <option value="worker">Worker (Standard execution agent)</option>
+              <option value="manager">Manager (Delegates tasks to teams)</option>
+            </select>
+          </div>
+
+          <div>
             <label className="block text-sm text-muted-foreground mb-1">Role</label>
             <input
               type="text"
@@ -115,7 +128,26 @@ function CreateAgentModal({
                 placeholder="/path/to/project"
                 className="flex-1 bg-muted border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:border-primary"
               />
-              <button className="px-3 py-2 bg-muted hover:bg-accent rounded-lg text-muted-foreground transition-colors">
+              <button
+                onClick={async () => {
+                  try {
+                    if (isTauri()) {
+                      const { open } = await import("@tauri-apps/plugin-dialog");
+                      const selected = await open({
+                        directory: true,
+                        multiple: false,
+                        title: "Select Working Directory",
+                      });
+                      if (selected) {
+                        setFolderPath(selected as string);
+                      }
+                    }
+                  } catch (err) {
+                    console.error("Failed to open folder dialog:", err);
+                  }
+                }}
+                className="px-3 py-2 bg-muted hover:bg-accent rounded-lg text-muted-foreground transition-colors"
+              >
                 <Folder className="h-4 w-4" />
               </button>
             </div>
@@ -124,12 +156,108 @@ function CreateAgentModal({
             </p>
           </div>
 
+          {/* Risk Acceptance */}
+          <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+            <p className="text-xs text-amber-400 mb-2">
+              ⚠️ <strong>Security Notice:</strong> AI agents can execute commands on your system. A
+              bad prompt can trick them into doing unsafe things. Only proceed if you understand the
+              risks.
+            </p>
+            <p className="text-xs text-muted-foreground mb-3">
+              Recommended: Use sandboxing, allowlists, and least-privilege tools. See{" "}
+              <a
+                href="https://docs.openclaw.ai/gateway/security"
+                className="text-primary hover:underline"
+                onClick={(e) => {
+                  e.preventDefault();
+                  import("@tauri-apps/plugin-opener")
+                    .then((m) => m.openUrl("https://docs.openclaw.ai/gateway/security"))
+                    .catch(() =>
+                      window.open("https://docs.openclaw.ai/gateway/security", "_blank"),
+                    );
+                }}
+              >
+                security docs
+              </a>
+              .
+            </p>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={acceptedRisk}
+                onChange={(e) => setAcceptedRisk(e.target.checked)}
+                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+              />
+              <span className="text-sm text-foreground">
+                I understand this is powerful and inherently risky. Continue.
+              </span>
+            </label>
+          </div>
+
           <button
             onClick={handleInitialize}
-            disabled={isInitializing || !name.trim()}
+            disabled={isInitializing || !name.trim() || !folderPath.trim() || !acceptedRisk}
+            data-testid="create-agent-submit"
             className="w-full py-3 bg-primary rounded-xl text-primary-foreground font-medium hover:opacity-90 transition-opacity mt-4 disabled:opacity-50"
           >
-            {isInitializing ? "Opening Terminal..." : "Initialize Agent"}
+            {isInitializing ? "Creating Agent..." : "Create Agent"}
+          </button>
+
+          {(!folderPath.trim() || !acceptedRisk) && name.trim() && (
+            <p className="text-xs text-muted-foreground text-center">
+              {!folderPath.trim() && "Select a working directory. "}
+              {!acceptedRisk && "Accept the risk acknowledgement to proceed."}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Delete Confirmation Modal
+function DeleteConfirmationModal({
+  agent,
+  onClose,
+  onConfirm,
+}: {
+  agent: Agent;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleConfirm = async () => {
+    setIsDeleting(true);
+    await onConfirm();
+    setIsDeleting(false);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-card border border-border rounded-2xl w-full max-w-sm p-6 shadow-2xl relative">
+        <h2 className="text-xl font-bold text-foreground mb-2">Delete Agent?</h2>
+        <p className="text-sm text-muted-foreground mb-6">
+          Are you sure you want to delete{" "}
+          <span className="font-semibold text-foreground">{agent.name}</span>? This action cannot be
+          undone.
+        </p>
+
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            disabled={isDeleting}
+            className="px-4 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={isDeleting}
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50 flex items-center gap-2"
+          >
+            {isDeleting ? "Deleting..." : "Delete"}
           </button>
         </div>
       </div>
@@ -138,13 +266,22 @@ function CreateAgentModal({
 }
 
 export function AgentsView() {
-  const [agents, setAgents] = useState<Agent[]>(initialAgents);
+  const [agents, setAgents] = useState<Agent[]>(agentStore.getAgents());
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "terminal" | "memory" | "settings">(
     "overview",
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [showCreateAgent, setShowCreateAgent] = useState(false);
+  const [agentToDelete, setAgentToDelete] = useState<Agent | null>(null);
+
+  // Sync with persistent store
+  useEffect(() => {
+    const unsub = agentStore.subscribe(() => {
+      setAgents(agentStore.getAgents());
+    });
+    return unsub;
+  }, []);
 
   const filteredAgents = agents.filter(
     (agent) =>
@@ -152,25 +289,27 @@ export function AgentsView() {
       agent.role.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
-  const handleInitialize = async (name: string, role: string) => {
-    // Create new agent entry locally
-    const newAgent: Agent = {
-      id: Date.now().toString(),
-      name: name,
-      role: role || "AI Agent",
-      avatar: "🤖",
-      status: "active", // Mark as active immediately to show terminal
-      model: "Claude 3.5 Sonnet",
-      currentTask: "Initializing environment...",
-      tokenUsage: 0,
-      cost: 0,
-      memoryLoad: 0,
-    };
-
-    setAgents((prev) => [...prev, newAgent]);
-    setSelectedAgent(newAgent);
-    setActiveTab("terminal"); // Switch to terminal tab
-    setShowCreateAgent(false);
+  const handleInitialize = async (
+    name: string,
+    role: string,
+    workingDir: string,
+    type: "worker" | "manager",
+    acceptedRisk: boolean,
+  ) => {
+    try {
+      await agentStore.addAgent(name, role, workingDir, type, acceptedRisk);
+      activityStore.addEvent(
+        name,
+        `was created as a ${type} and started initializing`,
+        "success",
+        "Dev",
+      );
+      // We'll let the sync pick up the new agent and update the list/select it
+      setShowCreateAgent(false);
+    } catch (e) {
+      console.error("Failed to create agent:", e);
+      alert("Failed to create agent. See console for details.");
+    }
   };
 
   const tabs = [
@@ -187,6 +326,29 @@ export function AgentsView() {
         <CreateAgentModal
           onClose={() => setShowCreateAgent(false)}
           onInitialize={handleInitialize}
+        />
+      )}
+
+      {/* Render Delete Confirmation Modal */}
+      {agentToDelete && (
+        <DeleteConfirmationModal
+          agent={agentToDelete}
+          onClose={() => setAgentToDelete(null)}
+          onConfirm={async () => {
+            const agentId = agentToDelete.id;
+            try {
+              if (selectedAgent?.id === agentId) {
+                setSelectedAgent(null);
+              }
+              killPtySession(agentId);
+              clearAgentOnboarding(agentId);
+              await agentStore.removeAgent(agentId);
+            } catch (e: any) {
+              console.error("Failed to delete agent:", e);
+              const msg = typeof e === "string" ? e : e?.message || "Unknown error";
+              alert(`Failed to delete agent: ${msg}`);
+            }
+          }}
         />
       )}
 
@@ -277,12 +439,12 @@ export function AgentsView() {
         <div className="border-t border-border p-4">
           <div className="flex items-center justify-between text-xs">
             <span className="text-muted-foreground">Total Agents</span>
-            <span className="text-foreground">{agents.length}</span>
+            <span className="text-foreground">{filteredAgents.length}</span>
           </div>
           <div className="flex items-center justify-between text-xs mt-2">
             <span className="text-muted-foreground">Active</span>
             <span className="text-green-400">
-              {agents.filter((a) => a.status === "active").length}
+              {filteredAgents.filter((a) => a.status === "active").length}
             </span>
           </div>
         </div>
@@ -323,23 +485,39 @@ export function AgentsView() {
               {/* Control Toolbar */}
               <div className="flex items-center gap-2">
                 {selectedAgent.status === "active" ? (
-                  <button className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm text-foreground transition-all hover:bg-muted">
+                  <button
+                    onClick={() => agentStore.stopAgent(selectedAgent.id)}
+                    className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm text-foreground transition-all hover:bg-muted"
+                  >
                     <Square className="h-4 w-4" />
                     Stop
                   </button>
                 ) : (
-                  <button className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm text-primary-foreground transition-all hover:shadow-lg hover:shadow-primary/50">
+                  <button
+                    onClick={() => agentStore.startAgent(selectedAgent.id, selectedAgent.name)}
+                    className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-sm text-primary-foreground transition-all hover:shadow-lg hover:shadow-primary/50"
+                  >
                     <Play className="h-4 w-4" />
                     Start
                   </button>
                 )}
-                <button className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                <button
+                  onClick={() => agentStore.sync()}
+                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
                   <RotateCw className="h-4 w-4" />
                 </button>
-                <button className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                <button
+                  onClick={() => setActiveTab("settings")}
+                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
                   <SettingsIcon className="h-4 w-4" />
                 </button>
-                <button className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50">
+                <button
+                  onClick={() => setAgentToDelete(selectedAgent)}
+                  className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-card text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50"
+                  title="Delete Agent"
+                >
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
@@ -367,9 +545,46 @@ export function AgentsView() {
           </div>
 
           {/* Tab Content */}
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-hidden relative">
             {activeTab === "overview" && <AgentOverview agent={selectedAgent} />}
-            {activeTab === "terminal" && <AgentTerminal agent={selectedAgent} />}
+
+            {/* ALL agent terminals are ALWAYS in the DOM — never unmounted.
+                They are hidden via CSS visibility when:
+                - A different tab is active, OR
+                - A different agent is selected.
+                This preserves terminal output across both agent switches AND tab switches. */}
+            <div
+              className="absolute inset-0"
+              style={
+                activeTab === "terminal"
+                  ? {}
+                  : {
+                      visibility: "hidden",
+                      pointerEvents: "none",
+                    }
+              }
+            >
+              {agents.map((agent) => (
+                <div
+                  key={`terminal-${agent.id}`}
+                  className="absolute inset-0"
+                  style={
+                    selectedAgent?.id === agent.id
+                      ? {}
+                      : {
+                          visibility: "hidden",
+                          pointerEvents: "none",
+                        }
+                  }
+                >
+                  <AgentTerminal
+                    agent={agent}
+                    visible={activeTab === "terminal" && selectedAgent?.id === agent.id}
+                  />
+                </div>
+              ))}
+            </div>
+
             {activeTab === "memory" && <AgentMemory agent={selectedAgent} />}
             {activeTab === "settings" && <AgentSettings agent={selectedAgent} />}
           </div>

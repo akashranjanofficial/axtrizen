@@ -1,0 +1,12 @@
+{
+  "browser": {
+    "enabled": true
+  },
+  "sandbox": {
+    "mode": "local"
+  },
+  "tts": {
+    "enabled": false,
+    "provider": "edge"
+  }
+}
