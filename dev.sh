@@ -1,61 +1,74 @@
 #!/bin/bash
 
-# Cleanup function to kill all child processes on exit
+# ══════════════════════════════════════════════════════════════════════
+#  Axtrizen Dev — One command to run everything
+#  Usage: ./dev.sh
+# ══════════════════════════════════════════════════════════════════════
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+OC_DIR="$SCRIPT_DIR/openclaw-core"
+
+# ── Cleanup on exit ─────────────────────────────────────────────────
 cleanup() {
   echo ""
   echo "🛑 Shutting down..."
-  # Kill OpenClaw Gateway if we started it
   if [ -n "$OPENCLAW_PID" ]; then
     kill $OPENCLAW_PID 2>/dev/null
     echo "   Stopped OpenClaw Gateway (PID $OPENCLAW_PID)"
   fi
-  # Kill any remaining child processes
-  killall -9 axtrizen-app 2>/dev/null
-  lsof -ti:5174 | xargs kill -9 2>/dev/null
+  killall -9 axtrizen-app 2>/dev/null || true
+  lsof -ti:5174 | xargs kill -9 2>/dev/null || true
   echo "✅ Cleanup complete"
   exit 0
 }
 
 trap cleanup SIGINT SIGTERM EXIT
 
-# Kill any existing processes (forcefully)
+# ── 1. Kill old processes ───────────────────────────────────────────
 echo "🧹 Cleaning up old processes..."
-
-# 1. Stop supervised OpenClaw Gateway daemon if running
-# Also stop via the submodule's openclaw.mjs
-echo "   Checking for supervised gateway daemons..."
-if [ -f "openclaw-core/openclaw.mjs" ]; then
-  node openclaw-core/openclaw.mjs gateway stop 2>/dev/null || true
+if [ -f "$OC_DIR/openclaw.mjs" ]; then
+  node "$OC_DIR/openclaw.mjs" gateway stop 2>/dev/null || true
 fi
 launchctl bootout gui/$UID/ai.openclaw.gateway 2>/dev/null || true
-
-# 2. Kill remaining lingering processes
 killall -9 axtrizen-app node 2>/dev/null || true
 lsof -ti:5174 | xargs kill -9 2>/dev/null || true
 lsof -ti:18789 | xargs kill -9 2>/dev/null || true
 lsof -ti:8000 | xargs kill -9 2>/dev/null || true
-
-# 3. Clean up lockfiles 
 rm -f ~/.axtrizen/gateway.lock 2>/dev/null
 
-# Gateway auth token (shared between Gateway and Rust backend)
+# ── 2. Init submodule (first clone) ────────────────────────────────
+if [ ! -f "$OC_DIR/package.json" ]; then
+  echo "📦 Initializing openclaw-core submodule..."
+  git submodule update --init --recursive
+fi
+
+# ── 3. Install OpenClaw dependencies ───────────────────────────────
+if [ ! -d "$OC_DIR/node_modules" ]; then
+  echo "📥 Installing OpenClaw dependencies..."
+  cd "$OC_DIR" && pnpm install && cd "$SCRIPT_DIR"
+fi
+
+# ── 4. Build OpenClaw (if dist missing) ────────────────────────────
+if [ ! -f "$OC_DIR/dist/entry.js" ]; then
+  echo "🔨 Building OpenClaw core..."
+  cd "$OC_DIR" && npm run build && cd "$SCRIPT_DIR"
+fi
+
+# ── 5. Install frontend dependencies ──────────────────────────────
+if [ ! -d "$SCRIPT_DIR/axtrizenFrontEnd/node_modules" ]; then
+  echo "📥 Installing frontend dependencies..."
+  cd "$SCRIPT_DIR/axtrizenFrontEnd" && npm install && cd "$SCRIPT_DIR"
+fi
+
+# ── 6. Start OpenClaw Gateway ──────────────────────────────────────
 export OPENCLAW_GATEWAY_TOKEN="dev-token"
 
-# Start OpenClaw Gateway in background
-# Use locally built openclaw.mjs from the openclaw-core submodule
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OC_DIR="$SCRIPT_DIR/openclaw-core"
-if [ -f "$OC_DIR/openclaw.mjs" ]; then
-  echo "🌐 Starting OpenClaw Gateway (submodule build)..."
-  node "$OC_DIR/openclaw.mjs" gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
-else
-  echo "🌐 Starting OpenClaw Gateway (installed)..."
-  echo "⚠️  Using installed openclaw binary. Run 'cd openclaw-core && npm run build' first for full agent support."
-  openclaw gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
-fi
+echo "🌐 Starting OpenClaw Gateway..."
+node "$OC_DIR/openclaw.mjs" gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
 OPENCLAW_PID=$!
 
-# Wait for Gateway to be ready (check port 18789)
 echo "⏳ Waiting for Gateway to be ready..."
 for i in $(seq 1 30); do
   if lsof -ti:18789 >/dev/null 2>&1; then
@@ -68,7 +81,7 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# Start Tauri Dev (Frontend will be started automatically by beforeDevCommand)
-echo "🚀 Starting App..."
+# ── 7. Start Tauri App ─────────────────────────────────────────────
+echo "🚀 Starting Axtrizen App..."
 cd axtrizen-app/src-tauri
 ../../axtrizenFrontEnd/node_modules/.bin/tauri dev
