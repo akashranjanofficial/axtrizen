@@ -157,7 +157,12 @@ export class OpenClawGatewayClient {
       this.handleMessage(String(evt.data));
     };
 
-    this.ws.onclose = (_evt) => {
+    this.ws.onclose = (evt) => {
+      // Flush ALL pending requests immediately so callers get an error
+      // instead of hanging until the 120s timeout.
+      this.flushPending(
+        new Error(`WebSocket closed: code=${evt.code} reason=${evt.reason || "unknown"}`),
+      );
       if (!this.closed) {
         this.setStatus("disconnected");
         this.scheduleReconnect();
