@@ -950,9 +950,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         for (let idx = 0; idx < orderedAgents.length; idx++) {
           const agent = orderedAgents[idx];
           const msgId = orderedMsgIds[idx];
-          const agentSessionKey = selectedTeam
-            ? `group:${selectedTeam.id}:${agent.id}`
-            : `agent:${agent.id}:main`;
+          const agentSessionKey = `agent:${agent.id}:main`;
           const taggedAgentName = agent.name || agent.id;
 
           setMessages((prev) =>
