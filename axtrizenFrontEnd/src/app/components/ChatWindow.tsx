@@ -880,7 +880,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
       // Helper: extract response text from agent response
       const extractResponseText = (response: any): string => {
-        const payloads = response.result?.payloads ?? [];
+        // Support both adapter format (top-level payloads) and raw format (response.result.payloads)
+        const payloads = response.payloads ?? response.result?.payloads ?? [];
         return (
           payloads
             .map((p: any) => p.text)
