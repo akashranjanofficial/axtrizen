@@ -83,11 +83,12 @@ export function classifyIntent(message: string, mentionedAgentIds: string[]): In
   // Decision/comparison language → Debate
   if (DECIDE_PATTERNS.test(message)) return "decide";
 
+  // Sequential/step-by-step → Pipeline (check BEFORE build since
+  // "write code then review" should be pipeline, not parallel build)
+  if (PIPELINE_PATTERNS.test(message)) return "pipeline";
+
   // Build/create language → MapReduce (parallel)
   if (BUILD_PATTERNS.test(message)) return "build";
-
-  // Sequential/step-by-step → Pipeline
-  if (PIPELINE_PATTERNS.test(message)) return "pipeline";
 
   // Default → RoundRobin discussion
   return "question";
