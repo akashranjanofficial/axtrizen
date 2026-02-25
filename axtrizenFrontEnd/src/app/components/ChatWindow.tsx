@@ -36,7 +36,8 @@ import {
   buildWorkerReportPrompt,
   buildManagerReviewPrompt,
 } from "../services/discussion-engine";
-import { getAdapter } from "../services/gateway-adapter";
+import { getAdapter, buildSessionKey } from "../services/gateway-adapter";
+import { chatStore } from "../stores/chat-store";
 import { agentStore } from "../stores/agent-store";
 import {
   getTeams,
@@ -523,19 +524,30 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
         const activeTeam = selectedTeamRef.current;
         const activeAgent = selectedAgentRef.current;
-        const expectedSessionKey = activeTeam
-          ? `team:${activeTeam.id}:group`
-          : activeAgent
-            ? `agent:${activeAgent.id}:main`
-            : null;
+        // Build expected session keys for the active chat context.
+        // For teams, we expect responses from any agent in the team.
+        // For DMs, we expect only the selected agent.
+        const expectedSessionKey = activeAgent
+          ? buildSessionKey(
+              activeAgent.id,
+              activeTeam ? { type: "team", teamId: activeTeam.id } : { type: "dm" },
+            )
+          : null;
+
+        // For team chats, accept messages from ANY agent in the team
+        const isTeamContext = !!activeTeam;
 
         // Prevent cross-talk: only inject streams meant for the currently open window
-        if (
-          payload?.sessionKey &&
-          expectedSessionKey &&
-          payload.sessionKey !== expectedSessionKey
-        ) {
-          return;
+        if (payload?.sessionKey && expectedSessionKey) {
+          if (isTeamContext) {
+            // For team chats, accept any session key that contains the team ID
+            const teamSuffix = `:team:${activeTeam!.id.toLowerCase()}`;
+            if (!payload.sessionKey.toLowerCase().includes(teamSuffix)) {
+              return;
+            }
+          } else if (payload.sessionKey !== expectedSessionKey) {
+            return;
+          }
         }
 
         if (payload?.state === "delta" && payload?.message?.content?.[0]?.text) {
@@ -633,7 +645,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         return;
       }
 
-      const sessionKey = `agent:${agentId}:main`;
+      const sessionKey = buildSessionKey(agentId, { type: "dm" });
       const result = await gw.getChatHistory(sessionKey);
 
       if (result.messages && result.messages.length > 0) {
@@ -814,8 +826,17 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       const gw = getAdapter();
 
       let targetAgents: AgentInfo[] = [];
-      let targetSessionKey = selectedAgent ? `agent:${selectedAgent.id}:main` : undefined;
-      const groupSessionKey = selectedTeam ? `team:${selectedTeam.id}:group` : targetSessionKey;
+      // Build ISOLATED session keys — DM and group NEVER share a key
+      const chatContext = selectedTeam
+        ? { type: "team" as const, teamId: selectedTeam.id }
+        : selectedAgent
+          ? { type: "dm" as const, agentId: selectedAgent.id }
+          : null;
+      let targetSessionKey = selectedAgent
+        ? buildSessionKey(selectedAgent.id, chatContext ?? { type: "dm" })
+        : undefined;
+      // Group session key for injectMessage (transcript storage)
+      const groupSessionKey = selectedTeam ? `team-chat:${selectedTeam.id}` : targetSessionKey;
       let isGroupChatTag = false;
 
       // Intercept @tags in Group Chats to route to specific agents
@@ -951,7 +972,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         for (let idx = 0; idx < orderedAgents.length; idx++) {
           const agent = orderedAgents[idx];
           const msgId = orderedMsgIds[idx];
-          const agentSessionKey = `agent:${agent.id}:main`;
+          const agentSessionKey = selectedTeam
+            ? buildSessionKey(agent.id, { type: "team", teamId: selectedTeam.id })
+            : buildSessionKey(agent.id, { type: "dm" });
           const taggedAgentName = agent.name || agent.id;
 
           setMessages((prev) =>
@@ -1053,7 +1076,10 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             const summaryResponse = await gw.sendMessage(
               summaryPrompt,
               summaryAgent.id,
-              `agent:${summaryAgent.id}:main`,
+              buildSessionKey(
+                summaryAgent.id,
+                selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
+              ),
             );
 
             let summaryText = extractResponseText(summaryResponse);
@@ -1125,7 +1151,10 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   const workerResponse = await gw.sendMessage(
                     workerPrompt,
                     worker.id,
-                    `agent:${worker.id}:main`,
+                    buildSessionKey(
+                      worker.id,
+                      selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
+                    ),
                   );
 
                   let workerText = extractResponseText(workerResponse);
@@ -1175,7 +1204,10 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                     const reviewResponse = await gw.sendMessage(
                       reviewPrompt,
                       summaryAgent.id,
-                      `agent:${summaryAgent.id}:main`,
+                      buildSessionKey(
+                        summaryAgent.id,
+                        selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
+                      ),
                     );
 
                     const reviewText = extractResponseText(reviewResponse);
@@ -1234,7 +1266,10 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                       const reviseResponse = await gw.sendMessage(
                         revisePrompt,
                         worker.id,
-                        `agent:${worker.id}:main`,
+                        buildSessionKey(
+                          worker.id,
+                          selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
+                        ),
                       );
 
                       currentOutput = extractResponseText(reviseResponse);
@@ -1391,7 +1426,10 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               const routeResponse = await gw.sendMessage(
                 routePrompt,
                 target.id,
-                `agent:${target.id}:main`,
+                buildSessionKey(
+                  target.id,
+                  selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
+                ),
               );
 
               let routeText = extractResponseText(routeResponse);
@@ -1449,7 +1487,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         await Promise.allSettled(
           targetAgents.map(async (agent, idx) => {
             const msgId = assistantMsgIds[idx];
-            const agentSessionKey = `agent:${agent.id}:main`;
+            const agentSessionKey = selectedTeam
+              ? buildSessionKey(agent.id, { type: "team", teamId: selectedTeam.id })
+              : buildSessionKey(agent.id, { type: "dm" });
             const taggedAgentName = agent.name || agent.id;
 
             try {
@@ -1523,7 +1563,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         : null;
 
     if (selectedAgent) {
-      const sessionKey = `agent:${selectedAgent.id}:main`;
+      const sessionKey = selectedTeam
+        ? buildSessionKey(selectedAgent.id, { type: "team", teamId: selectedTeam.id })
+        : buildSessionKey(selectedAgent.id, { type: "dm" });
       try {
         await getAdapter().resetSession(sessionKey);
       } catch (err) {

@@ -202,6 +202,41 @@ export class OpenClawAdapter implements GatewayAdapter {
   }
 }
 
+// ── Session Key Helpers ────────────────────────────────────────────────
+// These ensure DM and group chats NEVER share a session key.
+// The gateway format is: agent:<agentId>:<rest>
+// <rest> differentiates contexts: "main" (DM), "team:<teamId>" (group).
+
+/**
+ * Build a gateway session key for a specific chat context.
+ * - DM:    agent:<agentId>:main
+ * - Group: agent:<agentId>:team:<teamId>
+ */
+export function buildSessionKey(
+  agentId: string,
+  context: { type: "dm" } | { type: "team"; teamId: string },
+): string {
+  const normalized = agentId.toLowerCase().trim();
+  if (context.type === "team") {
+    return `agent:${normalized}:team:${context.teamId.toLowerCase().trim()}`;
+  }
+  return `agent:${normalized}:main`;
+}
+
+/**
+ * Build a local chat ID for the SQLite store.
+ * - DM:    dm:<agentId>
+ * - Group: team:<teamId>
+ */
+export function buildChatId(
+  context: { type: "dm"; agentId: string } | { type: "team"; teamId: string },
+): string {
+  if (context.type === "team") {
+    return `team:${context.teamId}`;
+  }
+  return `dm:${context.agentId}`;
+}
+
 // ── Singleton ──────────────────────────────────────────────────────────
 
 let _adapter: GatewayAdapter | null = null;
