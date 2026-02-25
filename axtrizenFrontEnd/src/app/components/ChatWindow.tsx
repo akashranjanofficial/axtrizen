@@ -925,572 +925,201 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       };
 
       if (isGroupChatTag && targetAgents.length >= 2) {
-        // ── ENTERPRISE SEQUENTIAL DISCUSSION MODE ──
-        // Features: Smart Speaker Selection, Convergence Detect, Agent Memory, Delegation
+        // ── ORCHESTRATION ENGINE MODE ──
+        // Auto-selects strategy: RoundRobin, MapReduce, Debate, Pipeline, or AutoRoute
+        const { orchestrate } = await import("../services/orchestration-engine");
 
-        // Build agent lookup for @mention routing
-        const agentLookup = new Map<string, (typeof targetAgents)[0]>();
+        // Parse @mentioned agent IDs from the message
+        const mentionedAgentIds: string[] = [];
+        const lowerBody = body.toLowerCase();
         for (const a of agents) {
           const name = (a.name || a.id).toLowerCase();
-          agentLookup.set(name, a);
-        }
-
-        // Detect @mentions in text and return matching agents (excluding sender)
-        const detectMentions = (text: string, senderId: string): typeof targetAgents => {
-          const mentioned: typeof targetAgents = [];
-          const lower = text.toLowerCase();
-          for (const [name, agent] of agentLookup) {
-            if (agent.id !== senderId && lower.includes(`@${name}`)) {
-              mentioned.push(agent);
-            }
-          }
-          return mentioned;
-        };
-
-        // ── 1. SMART SPEAKER SELECTION ──
-        // Order agents by relevance to the topic instead of fixed order
-        const discussionAgents = targetAgents.map((a) => ({
-          id: a.id,
-          name: a.name || a.id,
-          role: (a as any).role || a.name || "",
-        }));
-        const smartOrder = getSmartSpeakerOrder(discussionAgents, body);
-        const orderedAgents = smartOrder
-          .map((sa) => targetAgents.find((ta) => ta.id === sa.id))
-          .filter(Boolean) as typeof targetAgents;
-
-        // Recreate placeholders in smart order so UI shows correct sequence
-        const orderedMsgIds = orderedAgents.map((a) => {
-          const origIdx = targetAgents.findIndex((ta) => ta.id === a.id);
-          return origIdx >= 0 ? assistantMsgIds[origIdx] : `${Date.now()}-${a.id}`;
-        });
-        setMessages((prev) => {
-          // Remove old placeholders and add new ones in smart order
-          const withoutPlaceholders = prev.filter((m) => !assistantMsgIds.includes(m.id));
-          const newPlaceholders = orderedAgents.map((agent, i) => ({
-            id: orderedMsgIds[i],
-            role: "assistant" as const,
-            content: `⏳ [${i + 1}/${orderedAgents.length}] Waiting for @${agent.name || agent.id}...`,
-            timestamp: Date.now() + i,
-            status: "sending" as const,
-          }));
-          return [...withoutPlaceholders, ...newPlaceholders];
-        });
-
-        let discussionTranscript = body;
-        const agentResponses: AgentResponseEntry[] = [];
-
-        for (let idx = 0; idx < orderedAgents.length; idx++) {
-          const agent = orderedAgents[idx];
-          const msgId = orderedMsgIds[idx];
-          const agentSessionKey = selectedTeam
-            ? buildSessionKey(agent.id, { type: "team", teamId: selectedTeam.id })
-            : buildSessionKey(agent.id, { type: "dm" });
-          const taggedAgentName = agent.name || agent.id;
-
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === msgId
-                ? {
-                    ...m,
-                    content: `💭 @${taggedAgentName} is thinking...`,
-                    status: "sending" as const,
-                  }
-                : m,
-            ),
-          );
-
-          try {
-            // ── 3. AGENT MEMORY — load persistent context ──
-            const memory = loadAgentMemory(agent.id);
-            const memoryContext = formatMemoryContext(memory);
-
-            let contextPrompt = body;
-            if (agentResponses.length > 0) {
-              const prevResponses = agentResponses
-                .map((r) => `**@${r.name}** said:\n${r.text}`)
-                .join("\n\n---\n\n");
-              contextPrompt = `${body}\n\n---\n\n**Discussion so far:**\n\n${prevResponses}\n\n---\n\nNow it's your turn, @${taggedAgentName}. Build on what your teammates said above. Add your perspective and expertise. If you need input from a specific teammate, @mention them.`;
-            }
-
-            // Inject memory into prompt
-            if (memoryContext) {
-              contextPrompt += memoryContext;
-            }
-
-            const response = await gw.sendMessage(contextPrompt, agent.id, agentSessionKey);
-
-            let responseText = extractResponseText(response);
-
-            // ── 3. AGENT MEMORY — extract and save memory updates ──
-            const memResult = extractMemoryUpdates(agent.id, responseText);
-            if (memResult.updated) {
-              responseText = memResult.cleanText;
-            }
-
-            const finalResponseText = `**@${taggedAgentName}**: ${responseText}`;
-
-            agentResponses.push({ name: taggedAgentName, text: responseText, agentId: agent.id });
-            discussionTranscript += `\n\n**@${taggedAgentName}**: ${responseText}`;
-
-            if (groupSessionKey) {
-              await gw
-                .injectMessage(groupSessionKey, finalResponseText, "assistant")
-                .catch((e) => console.warn("Failed to inject response msg", e));
-            }
-
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === msgId ? { ...m, content: finalResponseText, status: "sent" as const } : m,
-              ),
-            );
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === msgId
-                  ? {
-                      ...m,
-                      content: `⚠️ Error from @${taggedAgentName}: ${errMsg}`,
-                      status: "error" as const,
-                    }
-                  : m,
-              ),
-            );
+          if (lowerBody.includes(`@${name}`)) {
+            mentionedAgentIds.push(a.id);
           }
         }
 
-        // ── SUMMARY ROUND with DELEGATION ──
-        if (agentResponses.length >= 2) {
-          const summaryAgent = orderedAgents[0];
-          const summaryAgentName = summaryAgent.name || summaryAgent.id;
-          const summaryMsgId = `summary-${Date.now()}`;
+        const msgIdMap = new Map<string, string>();
+        let msgCounter = 0;
 
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: summaryMsgId,
-              role: "assistant" as const,
-              content: `📋 @${summaryAgentName} is synthesizing the final plan...`,
-              timestamp: Date.now(),
-              status: "sending" as const,
-            },
-          ]);
-
-          try {
-            const allResponses = agentResponses
-              .map((r) => `**@${r.name}**:\n${r.text}`)
-              .join("\n\n---\n\n");
-
-            const summaryPrompt = `The team just discussed: "${body}"\n\nHere are all responses:\n\n${allResponses}\n\n---\n\nAs the lead, synthesize everyone's input into a **clear, actionable final plan**. Highlight agreements, resolve any conflicts, and list concrete next steps. If you need a specific agent to do something, @mention them with their task (e.g., "@Frontend: build the upload component").`;
-
-            const summaryResponse = await gw.sendMessage(
-              summaryPrompt,
-              summaryAgent.id,
-              buildSessionKey(
-                summaryAgent.id,
-                selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
-              ),
-            );
-
-            let summaryText = extractResponseText(summaryResponse);
-
-            // Extract memory from summary
-            const summaryMem = extractMemoryUpdates(summaryAgent.id, summaryText);
-            if (summaryMem.updated) {
-              summaryText = summaryMem.cleanText;
+        for await (const event of orchestrate({
+          message: body,
+          agents: targetAgents.map((a) => ({ id: a.id, name: a.name, role: (a as any).role })),
+          gateway: gw,
+          teamId: selectedTeam?.id,
+          mentionedAgentIds,
+        })) {
+          switch (event.type) {
+            case "agent_thinking": {
+              const msgId = `orch-${Date.now()}-${msgCounter++}`;
+              msgIdMap.set(event.agentId, msgId);
+              const pos = event.position ? ` [${event.position}]` : "";
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `💭${pos} @${event.agentName} is thinking...`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                },
+              ]);
+              break;
             }
-
-            const finalSummary = `📋 **Final Plan by @${summaryAgentName}**:\n\n${summaryText}`;
-
-            agentResponses.push({
-              name: summaryAgentName,
-              text: summaryText,
-              agentId: summaryAgent.id,
-            });
-            discussionTranscript += `\n\n📋 **Final Plan by @${summaryAgentName}**:\n\n${summaryText}`;
-
-            if (groupSessionKey) {
-              await gw
-                .injectMessage(groupSessionKey, finalSummary, "assistant")
-                .catch((e) => console.warn("Failed to inject summary", e));
-            }
-
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === summaryMsgId
-                  ? { ...m, content: finalSummary, status: "sent" as const }
-                  : m,
-              ),
-            );
-
-            // ── 4. HIERARCHICAL DELEGATION ──
-            // Parse manager's summary for task assignments
-            const delegationAgents = orderedAgents.map((a) => ({
-              id: a.id,
-              name: a.name || a.id,
-              role: (a as any).role || a.name || "",
-            }));
-            const delegations = parseDelegations(summaryText, delegationAgents, summaryAgent.id);
-
-            if (delegations.length > 0) {
-              const MAX_REVISIONS = 2;
-
-              for (const delegation of delegations) {
-                const worker = orderedAgents.find((a) => a.id === delegation.assignedTo.id);
-                if (!worker) {
-                  continue;
+            case "agent_response": {
+              const msgId = msgIdMap.get(event.agentId) || `orch-${Date.now()}-${msgCounter++}`;
+              const text = `**@${event.agentName}**: ${event.text}`;
+              setMessages((prev) => {
+                const exists = prev.find((m) => m.id === msgId);
+                if (exists) {
+                  return prev.map((m) =>
+                    m.id === msgId ? { ...m, content: text, status: "sent" as const } : m,
+                  );
                 }
-
-                const workerName = worker.name || worker.id;
-                const delegMsgId = `deleg-${Date.now()}-${worker.id}`;
-
-                // Show delegation status
-                setMessages((prev) => [
+                return [
                   ...prev,
                   {
-                    id: delegMsgId,
+                    id: msgId,
                     role: "assistant" as const,
-                    content: `🔨 @${workerName} is working on: "${delegation.taskDescription}"...`,
+                    content: text,
                     timestamp: Date.now(),
-                    status: "sending" as const,
+                    status: "sent" as const,
                   },
-                ]);
-
-                try {
-                  const workerPrompt = buildWorkerReportPrompt(delegation, discussionTranscript);
-                  const workerResponse = await gw.sendMessage(
-                    workerPrompt,
-                    worker.id,
-                    buildSessionKey(
-                      worker.id,
-                      selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
-                    ),
-                  );
-
-                  let workerText = extractResponseText(workerResponse);
-                  const workerMem = extractMemoryUpdates(worker.id, workerText);
-                  if (workerMem.updated) {
-                    workerText = workerMem.cleanText;
-                  }
-
-                  const workerFinal = `🔨 **@${workerName}** completed task:\n\n${workerText}`;
-
-                  agentResponses.push({ name: workerName, text: workerText, agentId: worker.id });
-                  discussionTranscript += `\n\n${workerFinal}`;
-
-                  if (groupSessionKey) {
-                    await gw
-                      .injectMessage(groupSessionKey, workerFinal, "assistant")
-                      .catch((e) => console.warn("Failed to inject delegation result", e));
-                  }
-
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.id === delegMsgId
-                        ? { ...m, content: workerFinal, status: "sent" as const }
-                        : m,
-                    ),
-                  );
-
-                  // ── Manager Review Loop ──
-                  let currentOutput = workerText;
-                  let approvedByManager = false;
-
-                  for (let rev = 0; rev < MAX_REVISIONS && !approvedByManager; rev++) {
-                    const reviewMsgId = `review-${Date.now()}-${worker.id}`;
-
-                    setMessages((prev) => [
-                      ...prev,
-                      {
-                        id: reviewMsgId,
-                        role: "assistant" as const,
-                        content: `🔍 @${summaryAgentName} is reviewing @${workerName}'s work...`,
-                        timestamp: Date.now(),
-                        status: "sending" as const,
-                      },
-                    ]);
-
-                    const reviewPrompt = buildManagerReviewPrompt(delegation, currentOutput);
-                    const reviewResponse = await gw.sendMessage(
-                      reviewPrompt,
-                      summaryAgent.id,
-                      buildSessionKey(
-                        summaryAgent.id,
-                        selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
-                      ),
-                    );
-
-                    const reviewText = extractResponseText(reviewResponse);
-                    const verdict = parseReviewVerdict(reviewText);
-
-                    if (verdict.approved) {
-                      approvedByManager = true;
-                      const approvedMsg = `✅ **@${summaryAgentName}** approved @${workerName}'s work:\n\n${reviewText}`;
-
-                      if (groupSessionKey) {
-                        await gw
-                          .injectMessage(groupSessionKey, approvedMsg, "assistant")
-                          .catch((e) => console.warn("Failed to inject review", e));
-                      }
-
-                      setMessages((prev) =>
-                        prev.map((m) =>
-                          m.id === reviewMsgId
-                            ? { ...m, content: approvedMsg, status: "sent" as const }
-                            : m,
-                        ),
-                      );
-                    } else {
-                      // Request revision
-                      const revisionMsg = `🔄 **@${summaryAgentName}** requested revision from @${workerName}:\n\n${reviewText}`;
-
-                      if (groupSessionKey) {
-                        await gw
-                          .injectMessage(groupSessionKey, revisionMsg, "assistant")
-                          .catch((e) => console.warn("Failed to inject review", e));
-                      }
-
-                      setMessages((prev) =>
-                        prev.map((m) =>
-                          m.id === reviewMsgId
-                            ? { ...m, content: revisionMsg, status: "sent" as const }
-                            : m,
-                        ),
-                      );
-
-                      // Worker revises
-                      const reviseMsgId = `revise-${Date.now()}-${worker.id}`;
-                      setMessages((prev) => [
-                        ...prev,
-                        {
-                          id: reviseMsgId,
-                          role: "assistant" as const,
-                          content: `🔨 @${workerName} is revising based on feedback...`,
-                          timestamp: Date.now(),
-                          status: "sending" as const,
-                        },
-                      ]);
-
-                      const revisePrompt = `Your manager @${summaryAgentName} reviewed your work and requested changes:\n\n"${reviewText}"\n\nYour previous output:\n${currentOutput}\n\nPlease revise your work based on the feedback.`;
-
-                      const reviseResponse = await gw.sendMessage(
-                        revisePrompt,
-                        worker.id,
-                        buildSessionKey(
-                          worker.id,
-                          selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
-                        ),
-                      );
-
-                      currentOutput = extractResponseText(reviseResponse);
-                      const reviseFinal = `🔨 **@${workerName}** revised (round ${rev + 2}):\n\n${currentOutput}`;
-
-                      if (groupSessionKey) {
-                        await gw
-                          .injectMessage(groupSessionKey, reviseFinal, "assistant")
-                          .catch((e) => console.warn("Failed to inject revision", e));
-                      }
-
-                      setMessages((prev) =>
-                        prev.map((m) =>
-                          m.id === reviseMsgId
-                            ? { ...m, content: reviseFinal, status: "sent" as const }
-                            : m,
-                        ),
-                      );
-                    }
-                  }
-                } catch (err) {
-                  const errMsg = err instanceof Error ? err.message : String(err);
-                  setMessages((prev) =>
-                    prev.map((m) =>
-                      m.id === delegMsgId
-                        ? {
-                            ...m,
-                            content: `⚠️ Delegation error: ${errMsg}`,
-                            status: "error" as const,
-                          }
-                        : m,
-                    ),
-                  );
-                }
-              }
-            }
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === summaryMsgId
-                  ? { ...m, content: `⚠️ Summary error: ${errMsg}`, status: "error" as const }
-                  : m,
-              ),
-            );
-          }
-        }
-
-        // ── @MENTION AUTO-ROUTING with CONVERGENCE DETECTION ──
-        const MAX_AUTO_ROUTE_DEPTH = 5;
-        let routeDepth = 0;
-        const processedPairs = new Set<string>();
-        const convergedAgentIds = new Set<string>();
-
-        let pendingMentions: Array<{
-          sender: (typeof targetAgents)[0];
-          target: (typeof targetAgents)[0];
-          senderResponse: string;
-        }> = [];
-
-        // Scan all responses for @mentions
-        for (const resp of agentResponses) {
-          const mentioned = detectMentions(resp.text, resp.agentId);
-          for (const target of mentioned) {
-            const pairKey = `${resp.agentId}->${target.id}`;
-            if (!processedPairs.has(pairKey)) {
-              const sender = agents.find((a) => a.id === resp.agentId);
-              if (sender) {
-                pendingMentions.push({ sender, target, senderResponse: resp.text });
-                processedPairs.add(pairKey);
-              }
-            }
-          }
-        }
-
-        while (pendingMentions.length > 0 && routeDepth < MAX_AUTO_ROUTE_DEPTH) {
-          // ── 2. CONVERGENCE DETECTION ──
-          const convergence = detectConvergence(
-            agentResponses.map((r) => ({
-              agentId: r.agentId,
-              name: r.name,
-              text: r.text,
-              timestamp: Date.now(),
-            })),
-            orderedAgents.length,
-          );
-
-          if (convergence.converged) {
-            const convergenceMsg = `✅ **Discussion converged**: ${convergence.reason} (confidence: ${Math.round(convergence.confidence * 100)}%)`;
-
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: `converge-${Date.now()}`,
-                role: "assistant" as const,
-                content: convergenceMsg,
-                timestamp: Date.now(),
-                status: "sent" as const,
-              },
-            ]);
-
-            if (groupSessionKey) {
-              await gw
-                .injectMessage(groupSessionKey, convergenceMsg, "assistant")
-                .catch((e) => console.warn("Failed to inject convergence", e));
-            }
-
-            break; // Stop routing — consensus reached
-          }
-
-          // Track converged agents for smart speaker selection
-          for (const [agentId, agreed] of convergence.agentAgreements) {
-            if (agreed) {
-              convergedAgentIds.add(agentId);
-            }
-          }
-
-          routeDepth++;
-          const nextBatch = [...pendingMentions];
-          pendingMentions = [];
-
-          for (const { sender, target, senderResponse } of nextBatch) {
-            // Skip if target already converged
-            if (convergedAgentIds.has(target.id)) {
-              continue;
-            }
-
-            const senderName = sender.name || sender.id;
-            const targetName = target.name || target.id;
-            const routeMsgId = `route-${Date.now()}-${target.id}`;
-
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: routeMsgId,
-                role: "assistant" as const,
-                content: `🔄 @${targetName} is responding to @${senderName}...`,
-                timestamp: Date.now(),
-                status: "sending" as const,
-              },
-            ]);
-
-            try {
-              // Load agent memory for routed response
-              const routeMemory = loadAgentMemory(target.id);
-              const routeMemContext = formatMemoryContext(routeMemory);
-
-              let routePrompt = `@${senderName} said to you:\n\n${senderResponse}\n\n---\n\n**Full discussion context:**\n\n${discussionTranscript}\n\n---\n\nRespond to @${senderName}'s message. Be specific and actionable. If you need input from another teammate, @mention them. If you agree and have nothing to add, say "I agree" or "LGTM".`;
-
-              if (routeMemContext) {
-                routePrompt += routeMemContext;
-              }
-
-              const routeResponse = await gw.sendMessage(
-                routePrompt,
-                target.id,
-                buildSessionKey(
-                  target.id,
-                  selectedTeam ? { type: "team", teamId: selectedTeam.id } : { type: "dm" },
-                ),
-              );
-
-              let routeText = extractResponseText(routeResponse);
-
-              // Extract memory updates
-              const routeMem = extractMemoryUpdates(target.id, routeText);
-              if (routeMem.updated) {
-                routeText = routeMem.cleanText;
-              }
-
-              const routeFinal = `**@${targetName}** → @${senderName}: ${routeText}`;
-
-              agentResponses.push({ name: targetName, text: routeText, agentId: target.id });
-              discussionTranscript += `\n\n${routeFinal}`;
-
+                ];
+              });
               if (groupSessionKey) {
-                await gw
-                  .injectMessage(groupSessionKey, routeFinal, "assistant")
-                  .catch((e) => console.warn("Failed to inject routed msg", e));
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
               }
-
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === routeMsgId ? { ...m, content: routeFinal, status: "sent" as const } : m,
-                ),
-              );
-
-              // Check for new mentions to continue the chain
-              const newMentions = detectMentions(routeText, target.id);
-              for (const nextTarget of newMentions) {
-                const nextPair = `${target.id}->${nextTarget.id}`;
-                if (!processedPairs.has(nextPair)) {
-                  pendingMentions.push({
-                    sender: target,
-                    target: nextTarget,
-                    senderResponse: routeText,
-                  });
-                  processedPairs.add(nextPair);
-                }
-              }
-            } catch (err) {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === routeMsgId
-                    ? { ...m, content: `⚠️ Route error: ${errMsg}`, status: "error" as const }
-                    : m,
-                ),
-              );
+              break;
             }
+            case "agent_error": {
+              const msgId = msgIdMap.get(event.agentId) || `orch-${Date.now()}-${msgCounter++}`;
+              setMessages((prev) => {
+                const exists = prev.find((m) => m.id === msgId);
+                const errContent = `⚠️ @${event.agentName}: ${event.error}`;
+                if (exists) {
+                  return prev.map((m) =>
+                    m.id === msgId ? { ...m, content: errContent, status: "error" as const } : m,
+                  );
+                }
+                return [
+                  ...prev,
+                  {
+                    id: msgId,
+                    role: "assistant" as const,
+                    content: errContent,
+                    timestamp: Date.now(),
+                    status: "error" as const,
+                  },
+                ];
+              });
+              break;
+            }
+            case "summary_thinking": {
+              const msgId = `summary-${Date.now()}`;
+              msgIdMap.set("summary", msgId);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `📋 @${event.agentName} is synthesizing...`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                },
+              ]);
+              break;
+            }
+            case "summary": {
+              const msgId = msgIdMap.get("summary") || `summary-${Date.now()}`;
+              const text = `📋 **Final Plan by @${event.agentName}**:\n\n${event.text}`;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId ? { ...m, content: text, status: "sent" as const } : m,
+                ),
+              );
+              if (groupSessionKey) {
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
+              }
+              break;
+            }
+            case "delegation_start": {
+              const msgId = `deleg-${Date.now()}-${msgCounter++}`;
+              msgIdMap.set(`deleg-${event.agentName}`, msgId);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `🔨 @${event.agentName} is working on: "${event.task}"...`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                },
+              ]);
+              break;
+            }
+            case "delegation_result": {
+              const msgId = msgIdMap.get(`deleg-${event.agentName}`) || `deleg-${Date.now()}`;
+              const text = `🔨 **@${event.agentName}** completed:\n\n${event.text}`;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId ? { ...m, content: text, status: "sent" as const } : m,
+                ),
+              );
+              if (groupSessionKey) {
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
+              }
+              break;
+            }
+            case "review_thinking": {
+              const msgId = `review-${Date.now()}-${msgCounter++}`;
+              msgIdMap.set("review", msgId);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `🔍 @${event.reviewerName} is reviewing @${event.workerName}'s work...`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                },
+              ]);
+              break;
+            }
+            case "review_result": {
+              const msgId = msgIdMap.get("review") || `review-${Date.now()}`;
+              const icon = event.approved ? "✅" : "🔄";
+              const text = `${icon} **@${event.reviewerName}**: ${event.text}`;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId ? { ...m, content: text, status: "sent" as const } : m,
+                ),
+              );
+              if (groupSessionKey) {
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
+              }
+              break;
+            }
+            case "revision": {
+              const msgId = `revise-${Date.now()}-${msgCounter++}`;
+              const text = `🔨 **@${event.agentName}** revised (round ${event.round}):\n\n${event.text}`;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: text,
+                  timestamp: Date.now(),
+                  status: "sent" as const,
+                },
+              ]);
+              if (groupSessionKey) {
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
+              }
+              break;
+            }
+            case "complete":
+              break;
           }
         }
       } else {
