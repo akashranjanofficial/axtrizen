@@ -1052,9 +1052,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             const summaryResponse = await gw.sendMessage(
               summaryPrompt,
               summaryAgent.id,
-              selectedTeam
-                ? `group:${selectedTeam.id}:${summaryAgent.id}`
-                : `agent:${summaryAgent.id}:main`,
+              `agent:${summaryAgent.id}:main`,
             );
 
             let summaryText = extractResponseText(summaryResponse);
@@ -1126,9 +1124,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   const workerResponse = await gw.sendMessage(
                     workerPrompt,
                     worker.id,
-                    selectedTeam
-                      ? `group:${selectedTeam.id}:${worker.id}`
-                      : `agent:${worker.id}:main`,
+                    `agent:${worker.id}:main`,
                   );
 
                   let workerText = extractResponseText(workerResponse);
@@ -1178,9 +1174,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                     const reviewResponse = await gw.sendMessage(
                       reviewPrompt,
                       summaryAgent.id,
-                      selectedTeam
-                        ? `group:${selectedTeam.id}:${summaryAgent.id}`
-                        : `agent:${summaryAgent.id}:main`,
+                      `agent:${summaryAgent.id}:main`,
                     );
 
                     const reviewText = extractResponseText(reviewResponse);
@@ -1239,9 +1233,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                       const reviseResponse = await gw.sendMessage(
                         revisePrompt,
                         worker.id,
-                        selectedTeam
-                          ? `group:${selectedTeam.id}:${worker.id}`
-                          : `agent:${worker.id}:main`,
+                        `agent:${worker.id}:main`,
                       );
 
                       currentOutput = extractResponseText(reviseResponse);
@@ -1398,7 +1390,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               const routeResponse = await gw.sendMessage(
                 routePrompt,
                 target.id,
-                selectedTeam ? `group:${selectedTeam.id}:${target.id}` : `agent:${target.id}:main`,
+                `agent:${target.id}:main`,
               );
 
               let routeText = extractResponseText(routeResponse);
