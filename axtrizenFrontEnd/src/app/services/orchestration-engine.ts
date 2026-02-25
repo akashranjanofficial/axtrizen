@@ -212,18 +212,22 @@ function buildPivotGatePrompt(
   const isFinalRound = round >= maxRounds;
   const verdictOptions = isFinalRound
     ? [
-        "This is the **final round**. You MUST choose CONVERGED.",
+        "This is the **final round**. You MUST choose either CONVERGED or ASSIGN.",
         "",
-        "**VERDICT: CONVERGED**",
-        "Provide a comprehensive final summary of the discussion outcomes.",
+        "- **VERDICT: CONVERGED** — Only if there are NO remaining action items. Provide a final summary.",
+        `- **VERDICT: ASSIGN** — If ANY agent needs to do work. List tasks as:`,
+        ...agentNames.map((n) => `   - @${n}: [task description]`),
       ].join("\n")
     : [
         "Choose ONE of these verdicts:",
         "",
-        "1. **VERDICT: CONVERGED** — Discussion is complete. Provide a clear summary of outcomes.",
+        "1. **VERDICT: CONVERGED** — Discussion is FULLY complete with NO remaining work to do.",
         "2. **VERDICT: CONTINUE** — More discussion needed. State what still needs resolution.",
         `3. **VERDICT: ASSIGN** — Specific agents need follow-up tasks. List as:`,
         ...agentNames.map((n) => `   - @${n}: [task description]`),
+        "",
+        "> **IMPORTANT:** If your summary includes action items, tasks, or deliverables for specific agents,",
+        "> you MUST use **ASSIGN**, not CONVERGED. CONVERGED means the discussion is done AND no work remains.",
         "",
         `Remaining rounds: ${maxRounds - round}`,
       ].join("\n");
@@ -442,7 +446,7 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
   yield { type: "complete", strategy: "round-robin" };
 }
 
-// ── Execute ASSIGN Tasks (from Pivot Gate) ──────────────────────────────
+// ── Execute ASSIGN Tasks with Manager Review Loop ───────────────────────
 
 async function* executeAssignments(
   ctx: OrchestrationContext,
@@ -451,6 +455,14 @@ async function* executeAssignments(
   transcript: string,
 ): AsyncGenerator<OrchestrationEvent> {
   const { gateway, teamId } = ctx;
+  const MAX_REVISIONS = 2;
+
+  // Identify the manager for the review loop
+  const manager =
+    orderedAgents.find((a) => a.role?.toLowerCase().includes("manager")) || orderedAgents[0];
+  const managerName = agentName(manager);
+
+  const completedReports: Array<{ worker: string; task: string; output: string }> = [];
 
   for (const assignment of assignments) {
     // Find the agent by name (case-insensitive)
@@ -466,7 +478,8 @@ async function* executeAssignments(
     yield { type: "delegation_start", agentName: name, task: assignment.task };
 
     try {
-      const prompt = withMemory(
+      // ── Step 1: Worker executes task ──
+      const taskPrompt = withMemory(
         worker.id,
         [
           `## Task Assignment from Manager`,
@@ -476,18 +489,101 @@ async function* executeAssignments(
           `**Context from team discussion:**`,
           transcript,
           ``,
-          `Complete this task based on the discussion context. Be specific and actionable.`,
+          `Complete this task thoroughly. When done, provide a clear **report** of what you accomplished,`,
+          `including specifics, decisions made, and any deliverables.`,
         ].join("\n"),
       );
 
-      const response = await sendWithRetry(
+      const taskResp = await sendWithRetry(
         gateway,
-        prompt,
+        taskPrompt,
         worker.id,
         sessionKey(worker.id, teamId),
       );
-      const text = processMemory(worker.id, extractText(response));
-      yield { type: "delegation_result", agentName: name, text };
+      let currentOutput = processMemory(worker.id, extractText(taskResp));
+      yield { type: "delegation_result", agentName: name, text: currentOutput };
+
+      // ── Step 2: Manager reviews the worker's report ──
+      for (let rev = 0; rev < MAX_REVISIONS; rev++) {
+        yield { type: "review_thinking", reviewerName: managerName, workerName: name };
+        console.log(
+          `[orchestration:assign] Manager ${managerName} reviewing ${name}'s work (attempt ${rev + 1})...`,
+        );
+
+        const reviewPrompt = withMemory(
+          manager.id,
+          [
+            `## Manager Review — @${name}'s Task Report`,
+            ``,
+            `**Original task:** ${assignment.task}`,
+            ``,
+            `**@${name}'s report:**`,
+            currentOutput,
+            ``,
+            `---`,
+            ``,
+            `Review this work carefully. Does it meet the requirements?`,
+            ``,
+            `If **APPROVED**: Start your response with "APPROVED" and provide brief feedback.`,
+            `If **REVISION NEEDED**: Start with "REVISION NEEDED" and explain exactly what needs to change.`,
+          ].join("\n"),
+        );
+
+        const reviewResp = await sendWithRetry(
+          gateway,
+          reviewPrompt,
+          manager.id,
+          sessionKey(manager.id, teamId),
+        );
+        const reviewText = processMemory(manager.id, extractText(reviewResp));
+        const approved = reviewText.toUpperCase().includes("APPROVED");
+
+        yield {
+          type: "review_result",
+          reviewerName: managerName,
+          approved,
+          text: reviewText,
+        };
+
+        if (approved) {
+          console.log(`[orchestration:assign] Manager APPROVED ${name}'s work`);
+          completedReports.push({ worker: name, task: assignment.task, output: currentOutput });
+          break;
+        }
+
+        // ── Step 3: Worker revises ──
+        console.log(`[orchestration:assign] Manager requested revision from ${name}`);
+        const revisePrompt = withMemory(
+          worker.id,
+          [
+            `## Revision Request from Manager`,
+            ``,
+            `Your manager reviewed your work and requested changes:`,
+            ``,
+            `"${reviewText}"`,
+            ``,
+            `**Your previous output:**`,
+            currentOutput,
+            ``,
+            `Please revise based on the feedback. Provide the complete updated deliverable.`,
+          ].join("\n"),
+        );
+
+        const reviseResp = await sendWithRetry(
+          gateway,
+          revisePrompt,
+          worker.id,
+          sessionKey(worker.id, teamId),
+        );
+        currentOutput = processMemory(worker.id, extractText(reviseResp));
+        yield { type: "revision", agentName: name, round: rev + 2, text: currentOutput };
+
+        // If this was the last revision attempt, auto-accept
+        if (rev === MAX_REVISIONS - 1) {
+          console.log(`[orchestration:assign] Max revisions reached for ${name}, auto-accepting`);
+          completedReports.push({ worker: name, task: assignment.task, output: currentOutput });
+        }
+      }
     } catch (err) {
       yield {
         type: "agent_error",
@@ -495,6 +591,51 @@ async function* executeAssignments(
         agentName: name,
         error: String(err),
       };
+    }
+  }
+
+  // ── Step 4: Manager produces final consolidated report ──
+  if (completedReports.length > 0) {
+    yield { type: "summary_thinking", agentName: managerName };
+    console.log(`[orchestration:assign] Manager producing final consolidated report...`);
+
+    try {
+      const allReports = completedReports
+        .map((r) => `### @${r.worker} — ${r.task}\n${r.output}`)
+        .join("\n\n---\n\n");
+
+      const finalPrompt = withMemory(
+        manager.id,
+        [
+          `## Final Consolidated Report`,
+          ``,
+          `All team members have completed their assigned tasks and you have reviewed their work.`,
+          `Here are the approved deliverables:\n`,
+          allReports,
+          ``,
+          `---`,
+          ``,
+          `Produce a **final consolidated report** for the human:`,
+          `1. Summarize what each team member delivered`,
+          `2. Highlight the overall outcome and how the pieces fit together`,
+          `3. Note any remaining follow-ups or next steps`,
+          `4. Present this as the **final product** ready for the human`,
+        ].join("\n"),
+      );
+
+      const finalResp = await sendWithRetry(
+        gateway,
+        finalPrompt,
+        manager.id,
+        sessionKey(manager.id, teamId),
+      );
+      const finalText = processMemory(manager.id, extractText(finalResp));
+      yield { type: "summary", agentName: managerName, text: finalText };
+    } catch (err) {
+      console.error(`[orchestration:assign] Manager final report FAILED:`, err);
+      // Still show individual reports if summary fails
+      const fallback = completedReports.map((r) => `**@${r.worker}**: ${r.output}`).join("\n\n");
+      yield { type: "summary", agentName: managerName, text: fallback };
     }
   }
 }
