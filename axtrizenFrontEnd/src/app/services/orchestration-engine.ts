@@ -64,10 +64,16 @@ const DECIDE_PATTERNS =
   /\b(should we|which is better|compare|versus|\bvs\b|or should|decide|choose|pick|prefer|trade-?off)\b/i;
 const PIPELINE_PATTERNS =
   /\b(then|after that|step by step|first.*then|and then review|write.*then.*review|review.*fix)\b/i;
+const COLLABORATIVE_PATTERNS =
+  /\b(discuss|team|everyone|all of you|brainstorm|collaborate|together|as a team|with the team|with team|round.?table|group discussion|let'?s talk)\b/i;
 
 export function classifyIntent(message: string, mentionedAgentIds: string[]): Intent {
-  // Single @mention → direct route
-  if (mentionedAgentIds.length === 1) return "route";
+  // Collaborative language overrides single-@mention routing.
+  // e.g. "@Manager discuss with team how we can develop X" → full team discussion
+  const isCollaborative = COLLABORATIVE_PATTERNS.test(message);
+
+  // Single @mention WITHOUT collaborative intent → direct route
+  if (mentionedAgentIds.length === 1 && !isCollaborative) return "route";
 
   // Decision/comparison language → Debate
   if (DECIDE_PATTERNS.test(message)) return "decide";
