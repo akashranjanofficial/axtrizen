@@ -1,8 +1,9 @@
 packages:
-  - .
-  - ui
-  - packages/*
-  - extensions/*
+  - openclaw-core
+  - openclaw-core/ui
+  - openclaw-core/packages/*
+  - openclaw-core/extensions/*
+  - axtrizenFrontEnd
 
 onlyBuiltDependencies:
   - "@lydell/node-pty"

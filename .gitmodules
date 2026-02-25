@@ -1,0 +1,4 @@
+[submodule "openclaw-core"]
+	path = openclaw-core
+	url = https://github.com/akashranjanofficial/openclaw.git
+	branch = openclaw_v1_terminalIntregated

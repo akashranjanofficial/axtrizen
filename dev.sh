@@ -22,8 +22,11 @@ trap cleanup SIGINT SIGTERM EXIT
 echo "🧹 Cleaning up old processes..."
 
 # 1. Stop supervised OpenClaw Gateway daemon if running
+# Also stop via the submodule's openclaw.mjs
 echo "   Checking for supervised gateway daemons..."
-./openclaw.mjs gateway stop 2>/dev/null || true
+if [ -f "openclaw-core/openclaw.mjs" ]; then
+  node openclaw-core/openclaw.mjs gateway stop 2>/dev/null || true
+fi
 launchctl bootout gui/$UID/ai.openclaw.gateway 2>/dev/null || true
 
 # 2. Kill remaining lingering processes
@@ -39,14 +42,15 @@ rm -f ~/.axtrizen/gateway.lock 2>/dev/null
 export OPENCLAW_GATEWAY_TOKEN="dev-token"
 
 # Start OpenClaw Gateway in background
-# Use locally built openclaw.mjs (has agents.create) instead of installed binary
+# Use locally built openclaw.mjs from the openclaw-core submodule
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/openclaw.mjs" ]; then
-  echo "🌐 Starting OpenClaw Gateway (local build)..."
-  node "$SCRIPT_DIR/openclaw.mjs" gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
+OC_DIR="$SCRIPT_DIR/openclaw-core"
+if [ -f "$OC_DIR/openclaw.mjs" ]; then
+  echo "🌐 Starting OpenClaw Gateway (submodule build)..."
+  node "$OC_DIR/openclaw.mjs" gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
 else
   echo "🌐 Starting OpenClaw Gateway (installed)..."
-  echo "⚠️  Using installed openclaw binary. Run 'npm run build' first for full agent support."
+  echo "⚠️  Using installed openclaw binary. Run 'cd openclaw-core && npm run build' first for full agent support."
   openclaw gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &
 fi
 OPENCLAW_PID=$!
