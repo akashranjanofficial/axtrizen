@@ -36,6 +36,7 @@ import {
   buildWorkerReportPrompt,
   buildManagerReviewPrompt,
 } from "../services/discussion-engine";
+import { getAdapter } from "../services/gateway-adapter";
 import { agentStore } from "../stores/agent-store";
 import {
   getTeams,
@@ -627,13 +628,13 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   // Load chat history from gateway for the given agent
   const loadChatHistory = useCallback(async (agentId: string) => {
     try {
-      const client = clientRef.current;
-      if (client.status !== "connected") {
+      const gw = getAdapter();
+      if (gw.status !== "connected") {
         return;
       }
 
       const sessionKey = `agent:${agentId}:main`;
-      const result = await client.getChatHistory(sessionKey);
+      const result = await gw.getChatHistory(sessionKey);
 
       if (result.messages && result.messages.length > 0) {
         const parsed: ChatMessage[] = result.messages
@@ -700,13 +701,13 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   // Load chat history from gateway for a team group chat
   const loadGroupChatHistory = useCallback(async (teamId: string) => {
     try {
-      const client = clientRef.current;
-      if (client.status !== "connected") {
+      const gw = getAdapter();
+      if (gw.status !== "connected") {
         return;
       }
 
       const sessionKey = `team:${teamId}:group`;
-      const result = await client.getChatHistory(sessionKey);
+      const result = await gw.getChatHistory(sessionKey);
 
       if (result.messages && result.messages.length > 0) {
         const parsed: ChatMessage[] = result.messages
@@ -768,8 +769,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
   const loadAgents = useCallback(async () => {
     try {
-      const client = clientRef.current;
-      const result = await client.listAgents();
+      const gw = getAdapter();
+      const result = await gw.listAgents();
       // Filter out the system 'main' agent and legacy group chat agents
       const userAgents = (result.agents ?? []).filter(
         (a) =>
@@ -810,7 +811,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     setError(null);
 
     try {
-      const client = clientRef.current;
+      const gw = getAdapter();
 
       let targetAgents: AgentInfo[] = [];
       let targetSessionKey = selectedAgent ? `agent:${selectedAgent.id}:main` : undefined;
@@ -857,9 +858,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
       // 1. Inject user's message into group chat transcript natively (only once)
       if (isGroupChatTag && groupSessionKey) {
-        client
-          .chatInject(groupSessionKey, body, "user")
-          .catch((e) => console.warn("Failed to inject user msg", e));
+        gw.injectMessage(groupSessionKey, body, "user").catch((e) =>
+          console.warn("Failed to inject user msg", e),
+        );
       }
 
       const assistantMsgIds = targetAgents.map((a) => `${Date.now()}-${a.id}`);
@@ -984,11 +985,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               contextPrompt += memoryContext;
             }
 
-            const response = await client.sendAgentMessage(
-              contextPrompt,
-              agent.id,
-              agentSessionKey,
-            );
+            const response = await gw.sendMessage(contextPrompt, agent.id, agentSessionKey);
 
             let responseText = extractResponseText(response);
 
@@ -1004,8 +1001,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             discussionTranscript += `\n\n**@${taggedAgentName}**: ${responseText}`;
 
             if (groupSessionKey) {
-              await client
-                .chatInject(groupSessionKey, finalResponseText, "assistant")
+              await gw
+                .injectMessage(groupSessionKey, finalResponseText, "assistant")
                 .catch((e) => console.warn("Failed to inject response msg", e));
             }
 
@@ -1054,7 +1051,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
             const summaryPrompt = `The team just discussed: "${body}"\n\nHere are all responses:\n\n${allResponses}\n\n---\n\nAs the lead, synthesize everyone's input into a **clear, actionable final plan**. Highlight agreements, resolve any conflicts, and list concrete next steps. If you need a specific agent to do something, @mention them with their task (e.g., "@Frontend: build the upload component").`;
 
-            const summaryResponse = await client.sendAgentMessage(
+            const summaryResponse = await gw.sendMessage(
               summaryPrompt,
               summaryAgent.id,
               selectedTeam
@@ -1080,8 +1077,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             discussionTranscript += `\n\n📋 **Final Plan by @${summaryAgentName}**:\n\n${summaryText}`;
 
             if (groupSessionKey) {
-              await client
-                .chatInject(groupSessionKey, finalSummary, "assistant")
+              await gw
+                .injectMessage(groupSessionKey, finalSummary, "assistant")
                 .catch((e) => console.warn("Failed to inject summary", e));
             }
 
@@ -1128,7 +1125,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
                 try {
                   const workerPrompt = buildWorkerReportPrompt(delegation, discussionTranscript);
-                  const workerResponse = await client.sendAgentMessage(
+                  const workerResponse = await gw.sendMessage(
                     workerPrompt,
                     worker.id,
                     selectedTeam
@@ -1148,8 +1145,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   discussionTranscript += `\n\n${workerFinal}`;
 
                   if (groupSessionKey) {
-                    await client
-                      .chatInject(groupSessionKey, workerFinal, "assistant")
+                    await gw
+                      .injectMessage(groupSessionKey, workerFinal, "assistant")
                       .catch((e) => console.warn("Failed to inject delegation result", e));
                   }
 
@@ -1180,7 +1177,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                     ]);
 
                     const reviewPrompt = buildManagerReviewPrompt(delegation, currentOutput);
-                    const reviewResponse = await client.sendAgentMessage(
+                    const reviewResponse = await gw.sendMessage(
                       reviewPrompt,
                       summaryAgent.id,
                       selectedTeam
@@ -1196,8 +1193,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                       const approvedMsg = `✅ **@${summaryAgentName}** approved @${workerName}'s work:\n\n${reviewText}`;
 
                       if (groupSessionKey) {
-                        await client
-                          .chatInject(groupSessionKey, approvedMsg, "assistant")
+                        await gw
+                          .injectMessage(groupSessionKey, approvedMsg, "assistant")
                           .catch((e) => console.warn("Failed to inject review", e));
                       }
 
@@ -1213,8 +1210,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                       const revisionMsg = `🔄 **@${summaryAgentName}** requested revision from @${workerName}:\n\n${reviewText}`;
 
                       if (groupSessionKey) {
-                        await client
-                          .chatInject(groupSessionKey, revisionMsg, "assistant")
+                        await gw
+                          .injectMessage(groupSessionKey, revisionMsg, "assistant")
                           .catch((e) => console.warn("Failed to inject review", e));
                       }
 
@@ -1241,7 +1238,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
                       const revisePrompt = `Your manager @${summaryAgentName} reviewed your work and requested changes:\n\n"${reviewText}"\n\nYour previous output:\n${currentOutput}\n\nPlease revise your work based on the feedback.`;
 
-                      const reviseResponse = await client.sendAgentMessage(
+                      const reviseResponse = await gw.sendMessage(
                         revisePrompt,
                         worker.id,
                         selectedTeam
@@ -1253,8 +1250,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                       const reviseFinal = `🔨 **@${workerName}** revised (round ${rev + 2}):\n\n${currentOutput}`;
 
                       if (groupSessionKey) {
-                        await client
-                          .chatInject(groupSessionKey, reviseFinal, "assistant")
+                        await gw
+                          .injectMessage(groupSessionKey, reviseFinal, "assistant")
                           .catch((e) => console.warn("Failed to inject revision", e));
                       }
 
@@ -1349,8 +1346,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             ]);
 
             if (groupSessionKey) {
-              await client
-                .chatInject(groupSessionKey, convergenceMsg, "assistant")
+              await gw
+                .injectMessage(groupSessionKey, convergenceMsg, "assistant")
                 .catch((e) => console.warn("Failed to inject convergence", e));
             }
 
@@ -1400,7 +1397,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                 routePrompt += routeMemContext;
               }
 
-              const routeResponse = await client.sendAgentMessage(
+              const routeResponse = await gw.sendMessage(
                 routePrompt,
                 target.id,
                 selectedTeam ? `group:${selectedTeam.id}:${target.id}` : `agent:${target.id}:main`,
@@ -1420,8 +1417,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               discussionTranscript += `\n\n${routeFinal}`;
 
               if (groupSessionKey) {
-                await client
-                  .chatInject(groupSessionKey, routeFinal, "assistant")
+                await gw
+                  .injectMessage(groupSessionKey, routeFinal, "assistant")
                   .catch((e) => console.warn("Failed to inject routed msg", e));
               }
 
@@ -1465,7 +1462,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             const taggedAgentName = agent.name || agent.id;
 
             try {
-              const response = await client.sendAgentMessage(body, agent.id, agentSessionKey);
+              const response = await gw.sendMessage(body, agent.id, agentSessionKey);
               const responseText = extractResponseText(response);
 
               const finalResponseText = isGroupChatTag
@@ -1473,8 +1470,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                 : responseText;
 
               if (isGroupChatTag && groupSessionKey) {
-                await client
-                  .chatInject(groupSessionKey, finalResponseText, "assistant")
+                await gw
+                  .injectMessage(groupSessionKey, finalResponseText, "assistant")
                   .catch((e) => console.warn("Failed to inject response msg", e));
               }
 
@@ -1537,7 +1534,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     if (selectedAgent) {
       const sessionKey = `agent:${selectedAgent.id}:main`;
       try {
-        await clientRef.current.resetSession(sessionKey);
+        await getAdapter().resetSession(sessionKey);
       } catch (err) {
         console.warn("Failed to reset session on gateway:", err);
       }
@@ -1546,7 +1543,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     } else if (selectedTeam) {
       const sessionKey = `team:${selectedTeam.id}:main`;
       try {
-        await clientRef.current.resetSession(sessionKey);
+        await getAdapter().resetSession(sessionKey);
       } catch (err) {
         console.warn("Failed to reset team session on gateway:", err);
       }
@@ -1637,8 +1634,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
   const handleReconnect = () => {
     setError(null);
-    clientRef.current.disconnect();
-    clientRef.current.connect();
+    getAdapter().disconnect();
+    getAdapter().connect();
   };
 
   // Status indicator
