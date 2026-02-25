@@ -20,6 +20,7 @@ vi.mock("../app/services/agent-memory", () => ({
 import {
   orchestrate,
   classifyIntent,
+  parsePivotGateVerdict,
   type OrchestrationEvent,
   type OrchestrationContext,
 } from "../app/services/orchestration-engine";
@@ -170,7 +171,7 @@ describe("orchestrate – RoundRobin (question)", () => {
     }
   });
 
-  it("includes summary when 2+ agents respond", async () => {
+  it("includes Pivot Gate verdict when 2+ agents respond", async () => {
     const events = await collectEvents({
       message: "what should our tech stack be?",
       agents: TEAM_AGENTS,
@@ -179,11 +180,13 @@ describe("orchestrate – RoundRobin (question)", () => {
       mentionedAgentIds: [],
     });
 
-    const summaryThinking = events.find((e) => e.type === "summary_thinking");
-    const summary = events.find((e) => e.type === "summary");
+    const pivotThinking = events.find((e) => e.type === "pivot_gate_thinking");
+    const pivotVerdict = events.find((e) => e.type === "pivot_gate_verdict");
+    const roundStart = events.find((e) => e.type === "round_start");
 
-    expect(summaryThinking).toBeDefined();
-    expect(summary).toBeDefined();
+    expect(roundStart).toBeDefined();
+    expect(pivotThinking).toBeDefined();
+    expect(pivotVerdict).toBeDefined();
   });
 
   it("gateway sendMessage is called once per agent + summary", async () => {
@@ -195,7 +198,7 @@ describe("orchestrate – RoundRobin (question)", () => {
       mentionedAgentIds: [],
     });
 
-    // 4 agents + 1 summary call = minimum 5 calls
+    // 4 agents + 1 Pivot Gate call = minimum 5 calls
     const sendCalls = (gw.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
     expect(sendCalls.length).toBeGreaterThanOrEqual(TEAM_AGENTS.length + 1);
   });
@@ -437,5 +440,48 @@ describe("orchestrate – event ordering", () => {
 
     const lastEvent = events[events.length - 1];
     expect(lastEvent.type).toBe("complete");
+  });
+});
+
+// ── Pivot Gate Verdict Parser Tests ─────────────────────────────────────
+
+describe("parsePivotGateVerdict", () => {
+  it("parses explicit CONVERGED verdict", () => {
+    const text =
+      "VERDICT: CONVERGED\n\nThe team has reached agreement on using React for the frontend.";
+    const verdict = parsePivotGateVerdict(text);
+    expect(verdict.type).toBe("CONVERGED");
+    expect(verdict.summary).toBe(text);
+  });
+
+  it("parses CONTINUE verdict", () => {
+    const text = "VERDICT: CONTINUE\n\nWe still need to discuss the database choice.";
+    const verdict = parsePivotGateVerdict(text);
+    expect(verdict.type).toBe("CONTINUE");
+    expect(verdict.summary).toBe(text);
+  });
+
+  it("parses ASSIGN verdict with task assignments", () => {
+    const text =
+      "VERDICT: ASSIGN\n\n- @Backend: Set up the PostgreSQL schema\n- @FrontEndDev1: Create the login component";
+    const verdict = parsePivotGateVerdict(text);
+    expect(verdict.type).toBe("ASSIGN");
+    expect(verdict.assignments).toBeDefined();
+    expect(verdict.assignments!.length).toBe(2);
+    expect(verdict.assignments![0].agentName).toBe("Backend");
+    expect(verdict.assignments![0].task).toContain("PostgreSQL");
+    expect(verdict.assignments![1].agentName).toBe("FrontEndDev1");
+  });
+
+  it("defaults to CONVERGED when no verdict keyword found", () => {
+    const text = "Great discussion everyone. The team agrees on the approach.";
+    const verdict = parsePivotGateVerdict(text);
+    expect(verdict.type).toBe("CONVERGED");
+  });
+
+  it("handles case-insensitive verdict", () => {
+    const text = "verdict: continue\nMore discussing needed.";
+    const verdict = parsePivotGateVerdict(text);
+    expect(verdict.type).toBe("CONTINUE");
   });
 });

@@ -52,7 +52,19 @@ export type OrchestrationEvent =
   | { type: "review_thinking"; reviewerName: string; workerName: string }
   | { type: "review_result"; reviewerName: string; approved: boolean; text: string }
   | { type: "revision"; agentName: string; round: number; text: string }
+  | { type: "round_start"; round: number; maxRounds: number }
+  | { type: "pivot_gate_thinking"; agentName: string; round: number }
+  | { type: "pivot_gate_verdict"; agentName: string; verdict: PivotVerdict; text: string }
   | { type: "complete"; strategy: string };
+
+/** Pivot Gate verdict types — inspired by War Room Wave Protocol */
+export type PivotVerdictType = "CONVERGED" | "CONTINUE" | "ASSIGN";
+
+export interface PivotVerdict {
+  type: PivotVerdictType;
+  summary?: string;
+  assignments?: Array<{ agentName: string; task: string }>;
+}
 
 export type Intent = "question" | "build" | "decide" | "pipeline" | "route";
 
@@ -148,9 +160,119 @@ function processMemory(agentId: string, text: string): string {
   return result.updated ? result.cleanText : text;
 }
 
+// ── System Prompt Builders (inspired by War Room + cc-godmode) ───────────
+
+const MAX_PIVOT_ROUNDS = 3;
+
+function buildManagerRoundPrompt(round: number, maxRounds: number): string {
+  if (round === 1) {
+    return [
+      "## Your Role: Team Manager (Round 1)",
+      "You are leading a team discussion. Share your high-level vision and direction.",
+      "",
+      "### Guidelines:",
+      "- Give your strategic perspective on the topic",
+      "- DO NOT assign follow-up tasks or @mention teammates — the orchestration engine handles turn-taking",
+      "- Your teammates will speak after you, building on your direction",
+      `- There may be up to ${maxRounds} discussion rounds`,
+    ].join("\n");
+  }
+  return [
+    `## Your Role: Team Manager (Round ${round}/${maxRounds})`,
+    "The team has gone through another round of discussion.",
+    "Build on the new input. Refine your position if needed.",
+    "",
+    "### Guidelines:",
+    "- Acknowledge new points from teammates",
+    "- Refine or adjust your direction based on their input",
+    "- DO NOT assign tasks or @mention teammates",
+  ].join("\n");
+}
+
+function buildWorkerRoundPrompt(agentRole: string, round: number): string {
+  return [
+    `## Team Discussion — Round ${round}`,
+    `Your role: ${agentRole}`,
+    "",
+    "### Guidelines:",
+    "- Focus on YOUR area of expertise",
+    "- Build on what teammates have said",
+    "- Be specific and actionable",
+    "- If you disagree, state your reasoning clearly",
+    "- DO NOT try to manage or orchestrate the team",
+  ].join("\n");
+}
+
+function buildPivotGatePrompt(
+  round: number,
+  maxRounds: number,
+  transcript: string,
+  agentNames: string[],
+): string {
+  const isFinalRound = round >= maxRounds;
+  const verdictOptions = isFinalRound
+    ? [
+        "This is the **final round**. You MUST choose CONVERGED.",
+        "",
+        "**VERDICT: CONVERGED**",
+        "Provide a comprehensive final summary of the discussion outcomes.",
+      ].join("\n")
+    : [
+        "Choose ONE of these verdicts:",
+        "",
+        "1. **VERDICT: CONVERGED** — Discussion is complete. Provide a clear summary of outcomes.",
+        "2. **VERDICT: CONTINUE** — More discussion needed. State what still needs resolution.",
+        `3. **VERDICT: ASSIGN** — Specific agents need follow-up tasks. List as:`,
+        ...agentNames.map((n) => `   - @${n}: [task description]`),
+        "",
+        `Remaining rounds: ${maxRounds - round}`,
+      ].join("\n");
+
+  return [
+    `## 🔄 Pivot Gate — Round ${round}/${maxRounds} Review`,
+    "",
+    "You have heard from all team members. Here is the full discussion:",
+    "",
+    "---",
+    transcript,
+    "---",
+    "",
+    verdictOptions,
+    "",
+    'Start your response with your verdict line (e.g., "VERDICT: CONVERGED"), then your explanation.',
+  ].join("\n");
+}
+
+// ── Pivot Gate Verdict Parser ────────────────────────────────────────────
+
+export function parsePivotGateVerdict(text: string): PivotVerdict {
+  const upper = text.toUpperCase();
+
+  // Parse VERDICT line
+  if (upper.includes("VERDICT: ASSIGN") || upper.includes("VERDICT:ASSIGN")) {
+    // Parse assignments: "@AgentName: task" or "- @AgentName: task"
+    const assignRegex = /@(\w+)[:\s]+(.+)/g;
+    const assignments: Array<{ agentName: string; task: string }> = [];
+    let match;
+    // Only parse lines after the VERDICT line
+    const afterVerdict = text.slice(text.toUpperCase().indexOf("ASSIGN"));
+    while ((match = assignRegex.exec(afterVerdict)) !== null) {
+      assignments.push({ agentName: match[1], task: match[2].trim() });
+    }
+    return { type: "ASSIGN", assignments, summary: text };
+  }
+
+  if (upper.includes("VERDICT: CONTINUE") || upper.includes("VERDICT:CONTINUE")) {
+    return { type: "CONTINUE", summary: text };
+  }
+
+  // Default to CONVERGED (explicit or implicit — if Manager doesn't use the format, we treat it as done)
+  return { type: "CONVERGED", summary: text };
+}
+
 // ── Strategies ──────────────────────────────────────────────────────────
 
-// ──── 1. RoundRobin ─────────────────────────────────────────────────────
+// ──── 1. RoundRobin (with Pivot Gate multi-round protocol) ──────────────
 
 async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<OrchestrationEvent> {
   const { message, agents, gateway, teamId } = ctx;
@@ -166,54 +288,215 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
     .map((da) => agents.find((a) => a.id === da.id))
     .filter(Boolean) as AgentInfo[];
 
-  const responses: Array<{ name: string; text: string; agentId: string }> = [];
-  let transcript = message;
+  // Identify the manager (for Pivot Gate)
+  const manager =
+    orderedInfos.find((a) => a.role?.toLowerCase().includes("manager")) || orderedInfos[0];
+  const managerName = agentName(manager);
+  const workerNames = orderedInfos.filter((a) => a.id !== manager.id).map(agentName);
 
   console.log(
-    `[orchestration:roundrobin] ${orderedInfos.length} agents in order: ${orderedInfos.map((a) => agentName(a)).join(", ")}`,
+    `[orchestration:roundrobin] ${orderedInfos.length} agents, manager=${managerName}, max_rounds=${MAX_PIVOT_ROUNDS}`,
   );
 
-  // Each agent speaks in order
-  for (let i = 0; i < orderedInfos.length; i++) {
-    const agent = orderedInfos[i];
-    const name = agentName(agent);
-    yield {
-      type: "agent_thinking",
-      agentId: agent.id,
-      agentName: name,
-      position: `${i + 1}/${orderedInfos.length}`,
-    };
+  let fullTranscript = `**User:** ${message}`;
+
+  // ── Multi-round loop with Pivot Gate ──
+  for (let round = 1; round <= MAX_PIVOT_ROUNDS; round++) {
+    yield { type: "round_start", round, maxRounds: MAX_PIVOT_ROUNDS };
+    console.log(`[orchestration:roundrobin] === ROUND ${round}/${MAX_PIVOT_ROUNDS} ===`);
+
+    const roundResponses: Array<{ name: string; text: string; agentId: string }> = [];
+
+    // Each agent speaks in order
+    for (let i = 0; i < orderedInfos.length; i++) {
+      const agent = orderedInfos[i];
+      const name = agentName(agent);
+      yield {
+        type: "agent_thinking",
+        agentId: agent.id,
+        agentName: name,
+        position: `${i + 1}/${orderedInfos.length}`,
+      };
+
+      try {
+        // Build the prompt with role-specific instructions
+        const isManager = agent.id === manager.id;
+        const rolePrompt = isManager
+          ? buildManagerRoundPrompt(round, MAX_PIVOT_ROUNDS)
+          : buildWorkerRoundPrompt(agent.role || agent.name || "team member", round);
+
+        let prompt: string;
+        if (round === 1 && roundResponses.length === 0) {
+          // First speaker in first round — just the message + role prompt
+          prompt = `${rolePrompt}\n\n---\n\n${message}`;
+        } else {
+          // Has prior context — include full transcript
+          const prev =
+            roundResponses.length > 0
+              ? roundResponses.map((r) => `**@${r.name}** said:\n${r.text}`).join("\n\n---\n\n")
+              : "";
+          const contextBlock = round > 1 ? `**Previous rounds:**\n${fullTranscript}` : "";
+          const currentRoundBlock = prev ? `**This round so far:**\n${prev}` : "";
+
+          prompt = [
+            rolePrompt,
+            "",
+            "---",
+            contextBlock,
+            currentRoundBlock,
+            "---",
+            "",
+            `Now it's your turn, @${name}. Share your perspective.`,
+          ]
+            .filter(Boolean)
+            .join("\n");
+        }
+
+        prompt = withMemory(agent.id, prompt);
+
+        console.log(`[orchestration:roundrobin] R${round} — calling ${name}...`);
+        const response = await sendWithRetry(
+          gateway,
+          prompt,
+          agent.id,
+          sessionKey(agent.id, teamId),
+        );
+        console.log(`[orchestration:roundrobin] R${round} — ${name} responded OK`);
+        const text = processMemory(agent.id, extractText(response));
+
+        roundResponses.push({ name, text, agentId: agent.id });
+
+        yield { type: "agent_response", agentId: agent.id, agentName: name, text };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.error(`[orchestration:roundrobin] R${round} — ${name} FAILED:`, error);
+        yield { type: "agent_error", agentId: agent.id, agentName: name, error };
+      }
+    }
+
+    // Append round responses to full transcript
+    for (const r of roundResponses) {
+      fullTranscript += `\n\n**@${r.name}** (round ${round}): ${r.text}`;
+    }
+
+    // Skip Pivot Gate if no one responded
+    if (roundResponses.length < 2) {
+      console.log(
+        `[orchestration:roundrobin] Only ${roundResponses.length} responses — skipping Pivot Gate`,
+      );
+      break;
+    }
+
+    // ── PIVOT GATE: Manager reviews all responses ──
+    yield { type: "pivot_gate_thinking", agentName: managerName, round };
+    console.log(
+      `[orchestration:roundrobin] Pivot Gate — Manager ${managerName} reviewing round ${round}...`,
+    );
 
     try {
-      let prompt = message;
-      if (responses.length > 0) {
-        const prev = responses.map((r) => `**@${r.name}** said:\n${r.text}`).join("\n\n---\n\n");
-        prompt = `${message}\n\n---\n\n**Discussion so far:**\n\n${prev}\n\n---\n\nNow it's your turn, @${name}. Build on what your teammates said. Add your perspective.`;
+      const pivotPrompt = buildPivotGatePrompt(
+        round,
+        MAX_PIVOT_ROUNDS,
+        fullTranscript,
+        workerNames,
+      );
+      const pivotResp = await sendWithRetry(
+        gateway,
+        withMemory(manager.id, pivotPrompt),
+        manager.id,
+        sessionKey(manager.id, teamId),
+      );
+      const pivotText = processMemory(manager.id, extractText(pivotResp));
+      const verdict = parsePivotGateVerdict(pivotText);
+
+      console.log(`[orchestration:roundrobin] Pivot verdict: ${verdict.type}`);
+      yield { type: "pivot_gate_verdict", agentName: managerName, verdict, text: pivotText };
+
+      if (verdict.type === "CONVERGED") {
+        // Discussion complete — emit summary and finish
+        yield { type: "summary", agentName: managerName, text: pivotText };
+        yield { type: "complete", strategy: "round-robin" };
+        return;
       }
-      prompt = withMemory(agent.id, prompt);
 
-      console.log(`[orchestration:roundrobin] Calling agent ${name} (${agent.id})...`);
-      const response = await sendWithRetry(gateway, prompt, agent.id, sessionKey(agent.id, teamId));
-      console.log(`[orchestration:roundrobin] Agent ${name} responded OK`);
-      let text = processMemory(agent.id, extractText(response));
+      if (verdict.type === "ASSIGN") {
+        // Manager assigned specific tasks — execute via delegation
+        yield { type: "summary", agentName: managerName, text: pivotText };
+        if (verdict.assignments && verdict.assignments.length > 0) {
+          yield* executeAssignments(ctx, orderedInfos, verdict.assignments, fullTranscript);
+        }
+        yield { type: "complete", strategy: "round-robin" };
+        return;
+      }
 
-      responses.push({ name, text, agentId: agent.id });
-      transcript += `\n\n**@${name}**: ${text}`;
-
-      yield { type: "agent_response", agentId: agent.id, agentName: name, text };
+      // CONTINUE → next round (loop continues)
+      console.log(`[orchestration:roundrobin] Manager says CONTINUE — starting round ${round + 1}`);
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      console.error(`[orchestration:roundrobin] Agent ${name} FAILED:`, error);
-      yield { type: "agent_error", agentId: agent.id, agentName: name, error };
+      console.error(`[orchestration:roundrobin] Pivot Gate FAILED:`, err);
+      // If pivot gate fails, just finish with what we have
+      break;
     }
   }
 
-  // Summary round if 2+ responded
-  if (responses.length >= 2) {
-    yield* summaryAndDelegation(ctx, orderedInfos, responses, transcript);
-  }
-
+  // Fell through all rounds — emit final summary from last Manager response
   yield { type: "complete", strategy: "round-robin" };
+}
+
+// ── Execute ASSIGN Tasks (from Pivot Gate) ──────────────────────────────
+
+async function* executeAssignments(
+  ctx: OrchestrationContext,
+  orderedAgents: AgentInfo[],
+  assignments: Array<{ agentName: string; task: string }>,
+  transcript: string,
+): AsyncGenerator<OrchestrationEvent> {
+  const { gateway, teamId } = ctx;
+
+  for (const assignment of assignments) {
+    // Find the agent by name (case-insensitive)
+    const worker = orderedAgents.find(
+      (a) => agentName(a).toLowerCase() === assignment.agentName.toLowerCase(),
+    );
+    if (!worker) {
+      console.warn(`[orchestration:assign] Agent "${assignment.agentName}" not found, skipping`);
+      continue;
+    }
+
+    const name = agentName(worker);
+    yield { type: "delegation_start", agentName: name, task: assignment.task };
+
+    try {
+      const prompt = withMemory(
+        worker.id,
+        [
+          `## Task Assignment from Manager`,
+          ``,
+          `**Your task:** ${assignment.task}`,
+          ``,
+          `**Context from team discussion:**`,
+          transcript,
+          ``,
+          `Complete this task based on the discussion context. Be specific and actionable.`,
+        ].join("\n"),
+      );
+
+      const response = await sendWithRetry(
+        gateway,
+        prompt,
+        worker.id,
+        sessionKey(worker.id, teamId),
+      );
+      const text = processMemory(worker.id, extractText(response));
+      yield { type: "delegation_result", agentName: name, text };
+    } catch (err) {
+      yield {
+        type: "agent_error",
+        agentId: worker.id,
+        agentName: name,
+        error: String(err),
+      };
+    }
+  }
 }
 
 // ──── 2. MapReduce ──────────────────────────────────────────────────────

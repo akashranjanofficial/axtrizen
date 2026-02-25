@@ -1139,6 +1139,54 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             }
             case "complete":
               break;
+            case "round_start": {
+              const msgId = `round-${Date.now()}-${msgCounter++}`;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `\n---\n\n🔄 **Round ${event.round}/${event.maxRounds}** starting...\n\n---`,
+                  timestamp: Date.now(),
+                  status: "sent" as const,
+                },
+              ]);
+              break;
+            }
+            case "pivot_gate_thinking": {
+              const msgId = `pivot-${Date.now()}-${msgCounter++}`;
+              msgIdMap.set("pivot-gate", msgId);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `🔄 **@${event.agentName}** is reviewing all responses (Pivot Gate round ${event.round})...`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                },
+              ]);
+              break;
+            }
+            case "pivot_gate_verdict": {
+              const msgId = msgIdMap.get("pivot-gate") || `pivot-${Date.now()}`;
+              const verdictIcon =
+                event.verdict.type === "CONVERGED"
+                  ? "✅"
+                  : event.verdict.type === "ASSIGN"
+                    ? "📋"
+                    : "🔄";
+              const text = `${verdictIcon} **@${event.agentName}** — Pivot Gate verdict: **${event.verdict.type}**\n\n${event.text}`;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId ? { ...m, content: text, status: "sent" as const } : m,
+                ),
+              );
+              if (groupSessionKey) {
+                gw.injectMessage(groupSessionKey, text, "assistant").catch(() => {});
+              }
+              break;
+            }
           }
         }
       } else {
