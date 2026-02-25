@@ -21,6 +21,15 @@ const CLIENT_VERSION: &str = "0.1.0";
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
 
+/// Tracks an in-flight chat.send streaming response.
+/// Accumulates delta text and resolves the oneshot when `state: "final"` arrives.
+struct ChatCollector {
+    buffer: String,
+    sender: Option<oneshot::Sender<String>>,
+}
+
+type ChatCollectorMap = Arc<Mutex<HashMap<String, ChatCollector>>>;
+
 /// Shared Gateway client state managed by Tauri
 pub struct GatewayClient {
     sender: Arc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
@@ -28,6 +37,8 @@ pub struct GatewayClient {
     token: Arc<Mutex<Option<String>>>,
     url: Arc<Mutex<String>>,
     connected: Arc<Mutex<bool>>,
+    /// Collects streaming chat responses keyed by runId
+    chat_collectors: ChatCollectorMap,
 }
 
 impl Default for GatewayClient {
@@ -38,6 +49,7 @@ impl Default for GatewayClient {
             token: Arc::new(Mutex::new(None)),
             url: Arc::new(Mutex::new("ws://127.0.0.1:18789".to_string())),
             connected: Arc::new(Mutex::new(false)),
+            chat_collectors: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -100,6 +112,7 @@ impl GatewayClient {
 
         let pending_clone = self.pending.clone();
         let connected_clone = self.connected.clone();
+        let chat_collectors_clone = self.chat_collectors.clone();
 
         // Spawn writer task: forwards outgoing messages to WebSocket
         tokio::spawn(async move {
@@ -139,9 +152,48 @@ impl GatewayClient {
                                 }
                             },
                             "event" => {
-                                // Event frame: ignore for now (health, tick, etc.)
                                 let event_name = frame.get("event").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                println!("[gateway] event: {}", event_name);
+                                
+                                // Capture chat events for streaming response collection
+                                if event_name == "chat" {
+                                    if let Some(payload) = frame.get("payload") {
+                                        let run_id = payload.get("runId")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let state_val = payload.get("state")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        
+                                        if !run_id.is_empty() {
+                                            let mut collectors = chat_collectors_clone.lock().await;
+                                            if let Some(collector) = collectors.get_mut(run_id) {
+                                                // Extract text from delta/final events
+                                                // IMPORTANT: Gateway sends CUMULATIVE text in each delta
+                                                // (each delta contains the full response so far),
+                                                // so we REPLACE the buffer, not append.
+                                                if let Some(text) = payload.get("message")
+                                                    .and_then(|m| m.get("content"))
+                                                    .and_then(|c| c.as_array())
+                                                    .and_then(|arr| arr.first())
+                                                    .and_then(|item| item.get("text"))
+                                                    .and_then(|t| t.as_str()) {
+                                                    collector.buffer = text.to_string();
+                                                }
+                                                
+                                                // When final/done/error state arrives, send the complete response
+                                                if state_val == "final" || state_val == "done" || state_val == "error" {
+                                                    let response = collector.buffer.clone();
+                                                    if let Some(sender) = collector.sender.take() {
+                                                        let _ = sender.send(response);
+                                                    }
+                                                    collectors.remove(run_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    println!("[gateway] event: {}", event_name);
+                                }
                             },
                             _ => {
                                 println!("[gateway] unknown frame type: {}", frame_type);
@@ -205,8 +257,33 @@ impl GatewayClient {
         }
     }
 
-    /// Send a request to the Gateway and wait for the response
+    /// Try to reconnect using stored URL and token
+    async fn try_reconnect(&self) -> Result<(), String> {
+        let url = self.url.lock().await.clone();
+        let token = self.token.lock().await.clone();
+        println!("[gateway] Auto-reconnecting to {}...", url);
+        self.connect(&url, token).await
+    }
+
+    /// Send a request to the Gateway and wait for the response.
+    /// Auto-reconnects once if the channel is closed.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        // First attempt
+        match self.call_inner(method, params.clone()).await {
+            Ok(val) => Ok(val),
+            Err(e) if e.contains("channel closed") || e.contains("Not connected") => {
+                // Connection dropped — try reconnecting once
+                println!("[gateway] Connection lost ({}), attempting reconnect...", e);
+                self.try_reconnect().await?;
+                // Retry call after reconnect
+                self.call_inner(method, params).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Inner call implementation (no reconnect logic)
+    async fn call_inner(&self, method: &str, params: Value) -> Result<Value, String> {
         let sender = self.sender.lock().await;
         let tx = sender.as_ref().ok_or("Not connected to Gateway")?;
 
@@ -222,8 +299,8 @@ impl GatewayClient {
         tx.send(request.to_string())
             .map_err(|e| format!("Failed to send: {}", e))?;
 
-        // Wait for response with timeout
-        match tokio::time::timeout(std::time::Duration::from_secs(30), resp_rx).await {
+        // Wait for response with timeout (120s for LLM responses)
+        match tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
@@ -236,9 +313,70 @@ impl GatewayClient {
         }
     }
 
+    /// Send a chat.send request and wait for the full streaming response.
+    /// Unlike `call()` which only gets the initial ack, this method registers
+    /// a collector for the runId and waits for the complete LLM response.
+    pub async fn send_chat_and_wait(&self, params: Value) -> Result<String, String> {
+        // The idempotencyKey becomes the runId
+        let run_id = params.get("idempotencyKey")
+            .and_then(|v| v.as_str())
+            .ok_or("send_chat_and_wait requires idempotencyKey in params")?
+            .to_string();
+
+        // Register a collector BEFORE sending the request
+        let (resp_tx, resp_rx) = oneshot::channel::<String>();
+        {
+            let mut collectors = self.chat_collectors.lock().await;
+            collectors.insert(run_id.clone(), ChatCollector {
+                buffer: String::new(),
+                sender: Some(resp_tx),
+            });
+        }
+
+        // Send the chat.send request (returns ack immediately)
+        let ack = self.call("chat.send", params).await;
+        if let Err(e) = &ack {
+            // Clean up collector on send failure
+            self.chat_collectors.lock().await.remove(&run_id);
+            return Err(format!("chat.send failed: {}", e));
+        }
+
+        // Wait for the streaming response to complete (timeout: 120s)
+        match tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx).await {
+            Ok(Ok(response)) => {
+                if response.is_empty() {
+                    Ok("(Agent produced no output)".to_string())
+                } else {
+                    Ok(response)
+                }
+            }
+            Ok(Err(_)) => {
+                self.chat_collectors.lock().await.remove(&run_id);
+                Err("Chat response channel closed".to_string())
+            }
+            Err(_) => {
+                self.chat_collectors.lock().await.remove(&run_id);
+                Err("Chat response timed out (120s)".to_string())
+            }
+        }
+    }
+
     /// Check if connected
     pub async fn is_connected(&self) -> bool {
         *self.connected.lock().await
+    }
+
+    /// Create a clone of this client that shares the same underlying connection.
+    /// Used by the orchestrator background task.
+    pub fn clone_for_task(&self) -> GatewayClient {
+        GatewayClient {
+            sender: self.sender.clone(),
+            pending: self.pending.clone(),
+            token: self.token.clone(),
+            url: self.url.clone(),
+            connected: self.connected.clone(),
+            chat_collectors: self.chat_collectors.clone(),
+        }
     }
 }
 

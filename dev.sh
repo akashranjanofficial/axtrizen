@@ -20,9 +20,20 @@ trap cleanup SIGINT SIGTERM EXIT
 
 # Kill any existing processes (forcefully)
 echo "🧹 Cleaning up old processes..."
-killall -9 axtrizen-app node 2>/dev/null
-lsof -ti:5174 | xargs kill -9 2>/dev/null
-lsof -ti:18789 | xargs kill -9 2>/dev/null
+
+# 1. Stop supervised OpenClaw Gateway daemon if running
+echo "   Checking for supervised gateway daemons..."
+./openclaw.mjs gateway stop 2>/dev/null || true
+launchctl bootout gui/$UID/ai.openclaw.gateway 2>/dev/null || true
+
+# 2. Kill remaining lingering processes
+killall -9 axtrizen-app node 2>/dev/null || true
+lsof -ti:5174 | xargs kill -9 2>/dev/null || true
+lsof -ti:18789 | xargs kill -9 2>/dev/null || true
+lsof -ti:8000 | xargs kill -9 2>/dev/null || true
+
+# 3. Clean up lockfiles 
+rm -f ~/.axtrizen/gateway.lock 2>/dev/null
 
 # Gateway auth token (shared between Gateway and Rust backend)
 export OPENCLAW_GATEWAY_TOKEN="dev-token"

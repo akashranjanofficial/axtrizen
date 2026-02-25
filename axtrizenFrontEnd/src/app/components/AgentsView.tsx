@@ -546,7 +546,11 @@ export function AgentsView() {
 
           {/* Tab Content */}
           <div className="flex-1 overflow-hidden relative">
-            {activeTab === "overview" && <AgentOverview agent={selectedAgent} />}
+            {activeTab === "overview" && (
+              <div className="h-full overflow-y-auto">
+                <AgentOverview agent={selectedAgent} />
+              </div>
+            )}
 
             {/* ALL agent terminals are ALWAYS in the DOM — never unmounted.
                 They are hidden via CSS visibility when:
@@ -585,8 +589,16 @@ export function AgentsView() {
               ))}
             </div>
 
-            {activeTab === "memory" && <AgentMemory agent={selectedAgent} />}
-            {activeTab === "settings" && <AgentSettings agent={selectedAgent} />}
+            {activeTab === "memory" && (
+              <div className="h-full overflow-y-auto">
+                <AgentMemory agent={selectedAgent} />
+              </div>
+            )}
+            {activeTab === "settings" && (
+              <div className="h-full overflow-y-auto">
+                <AgentSettings agent={selectedAgent} />
+              </div>
+            )}
           </div>
         </div>
       ) : (

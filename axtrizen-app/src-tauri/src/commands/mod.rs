@@ -14,3 +14,5 @@ pub mod devices;
 pub mod logs;
 pub mod projects;
 pub mod teams;
+pub mod orchestrator;
+pub mod agent_metrics;

@@ -310,13 +310,59 @@ export async function getProjects(): Promise<Project[]> {
 export async function createProject(
   name: string,
   description: string | null,
-  team_id: string | null = null,
+  teamId: string | null = null,
 ): Promise<Project> {
-  return invoke<Project>("create_project", { name, description, team_id });
+  return invoke<Project>("create_project", { name, description, teamId });
+}
+
+export async function updateProject(
+  id: string,
+  name: string,
+  description: string | null,
+  teamId: string | null,
+  status: string,
+  phase: string,
+  workspacePath?: string | null,
+): Promise<Project> {
+  return invoke<Project>("update_project", {
+    id,
+    name,
+    description,
+    teamId,
+    status,
+    phase,
+    workspacePath: workspacePath ?? undefined,
+  });
 }
 
 export async function deleteProject(id: string): Promise<void> {
   return invoke<void>("delete_project", { id });
+}
+
+/**
+ * Open a native folder picker dialog and return the selected path.
+ * Returns null if the user cancelled.
+ */
+export async function pickFolder(title?: string): Promise<string | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: title || "Select Workspace Folder",
+  });
+  // open() returns string | string[] | null for directory mode
+  if (typeof selected === "string") {
+    return selected;
+  }
+  if (
+    selected &&
+    typeof selected === "object" &&
+    "length" in selected &&
+    (selected as string[]).length > 0
+  ) {
+    return (selected as string[])[0];
+  }
+  return null;
 }
 
 // ==================== Team Commands ====================
@@ -371,4 +417,233 @@ export async function addTeamMember(teamId: string, agentId: string): Promise<vo
 
 export async function removeTeamMember(teamId: string, agentId: string): Promise<void> {
   return invoke<void>("remove_team_member", { teamId, agentId });
+}
+
+// ==================== Orchestrator Commands ====================
+
+export interface ExecutionLogEntry {
+  id: string;
+  phase: string;
+  agent_id: string | null;
+  agent_name: string | null;
+  event_type: string;
+  content: string | null;
+  created_at: string;
+}
+
+export interface ExecutionStatus {
+  status: string;
+  phase: string;
+  logs: ExecutionLogEntry[];
+}
+
+export async function startProjectExecution(
+  projectId: string,
+): Promise<{ status: string; projectId: string }> {
+  return invoke<{ status: string; projectId: string }>("start_project_execution", { projectId });
+}
+
+export async function stopProjectExecution(
+  projectId: string,
+): Promise<{ status: string; projectId: string }> {
+  return invoke<{ status: string; projectId: string }>("stop_project_execution", { projectId });
+}
+
+export async function getExecutionStatus(projectId: string): Promise<ExecutionStatus> {
+  return invoke<ExecutionStatus>("get_execution_status", { projectId });
+}
+
+export async function resumeProjectExecution(
+  projectId: string,
+  feedback: string,
+): Promise<{ status: string; projectId: string }> {
+  return invoke<{ status: string; projectId: string }>("resume_project_execution", {
+    projectId,
+    feedback,
+  });
+}
+
+// ==================== Chat Persistence Commands ====================
+
+export interface Conversation {
+  id: string;
+  session_key: string;
+  title: string | null;
+  conversation_type: "direct" | "group";
+  agent_id: string | null;
+  team_id: string | null;
+  last_message_at: string | null;
+  message_count: number;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  sender_agent_id: string | null;
+  sender_agent_name: string | null;
+  label: string | null;
+  metadata: string | null;
+  created_at: string;
+}
+
+/**
+ * Save a chat message to the local SQLite database
+ */
+export async function saveChatMessage(params: {
+  sessionKey: string;
+  role: string;
+  content: string;
+  senderAgentId?: string;
+  senderAgentName?: string;
+  label?: string;
+  conversationType?: string;
+  agentId?: string;
+  teamId?: string;
+  title?: string;
+}): Promise<{ ok: boolean; messageId: string; conversationId: string }> {
+  return invoke("save_chat_message", {
+    sessionKey: params.sessionKey,
+    role: params.role,
+    content: params.content,
+    senderAgentId: params.senderAgentId,
+    senderAgentName: params.senderAgentName,
+    label: params.label,
+    conversationType: params.conversationType,
+    agentId: params.agentId,
+    teamId: params.teamId,
+    title: params.title,
+  });
+}
+
+/**
+ * Get all conversations, sorted by most recent activity
+ */
+export async function getAllConversations(): Promise<{ conversations: Conversation[] }> {
+  return invoke("get_all_conversations");
+}
+
+/**
+ * Get chat messages for a conversation by session key
+ */
+export async function getConversationHistory(
+  sessionKey: string,
+  limit?: number,
+): Promise<{ messages: ChatMessage[] }> {
+  return invoke("get_conversation_history", { sessionKey, limit });
+}
+
+/**
+ * Search chat messages across all conversations
+ */
+export async function searchChat(
+  query: string,
+  limit?: number,
+): Promise<{ messages: ChatMessage[] }> {
+  return invoke("search_chat", { query, limit });
+}
+
+/**
+ * Delete a conversation and all its messages
+ */
+export async function deleteConversation(conversationId: string): Promise<{ ok: boolean }> {
+  return invoke("delete_conversation", { conversationId });
+}
+
+// ==================== Agent Metrics Commands ====================
+
+export interface AgentUsageData {
+  tokens_in: number;
+  tokens_out: number;
+  total_tokens: number;
+  cost_usd: number;
+  model: string | null;
+  last_updated: string | null;
+}
+
+export interface AgentSessionStats {
+  message_count: number;
+  context_pct: number;
+  context_max_tokens: number;
+}
+
+export interface ActivityEntry {
+  id: number;
+  action_type: string;
+  description: string | null;
+  metadata: string | null;
+  created_at: string;
+}
+
+export interface ToolCallEntry {
+  id: number;
+  tool_name: string;
+  arguments: string | null;
+  result_summary: string | null;
+  duration_ms: number | null;
+  status: string;
+  created_at: string | null;
+}
+
+/**
+ * Get agent usage metrics (tokens + cost). Uses SQLite cache with Gateway refresh.
+ */
+export async function getAgentUsage(agentId: string): Promise<AgentUsageData> {
+  return invoke("get_agent_usage", { agentId });
+}
+
+/**
+ * Get agent session stats (message count + context window usage)
+ */
+export async function getAgentSessionStats(agentId: string): Promise<AgentSessionStats> {
+  return invoke("get_agent_session_stats", { agentId });
+}
+
+/**
+ * Get recent agent activity entries
+ */
+export async function getAgentActivity(agentId: string, limit?: number): Promise<ActivityEntry[]> {
+  return invoke("get_agent_activity", { agentId, limit });
+}
+
+/**
+ * Get recent tool calls for an agent
+ */
+export async function getAgentToolCalls(agentId: string, limit?: number): Promise<ToolCallEntry[]> {
+  return invoke("get_agent_tool_calls", { agentId, limit });
+}
+
+/**
+ * Log an agent activity entry
+ */
+export async function logAgentActivity(
+  agentId: string,
+  actionType: string,
+  description?: string,
+  metadata?: string,
+): Promise<void> {
+  return invoke("log_agent_activity", { agentId, actionType, description, metadata });
+}
+
+/**
+ * Log a tool call for an agent
+ */
+export async function logAgentToolCall(
+  agentId: string,
+  toolName: string,
+  args?: string,
+  resultSummary?: string,
+  durationMs?: number,
+  status?: string,
+): Promise<void> {
+  return invoke("log_agent_tool_call", {
+    agentId,
+    toolName,
+    arguments: args,
+    resultSummary,
+    durationMs,
+    status,
+  });
 }

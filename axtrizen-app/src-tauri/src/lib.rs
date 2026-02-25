@@ -4,8 +4,10 @@
 pub mod commands;
 pub mod db;
 pub mod gateway_client;
+pub mod orchestrator;
 
-use commands::{agents, terminal, config, settings, chat, sessions, usage, system, skills, cron, devices, logs};
+use std::sync::Arc;
+use commands::{agents, terminal, config, settings, chat, sessions, usage, system, skills, cron, devices, logs, agent_metrics};
 use gateway_client::GatewayClient;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -50,6 +52,13 @@ pub fn run() {
             chat::chat_abort,
             chat::chat_inject,
             
+            // Chat persistence (local SQLite)
+            chat::save_chat_message,
+            chat::get_all_conversations,
+            chat::get_conversation_history,
+            chat::search_chat,
+            chat::delete_conversation,
+            
             // Session commands
             sessions::sessions_list,
             sessions::sessions_preview,
@@ -60,6 +69,7 @@ pub fn run() {
             // Project commands
             commands::projects::get_projects,
             commands::projects::create_project,
+            commands::projects::update_project,
             commands::projects::delete_project,
 
             // Team commands
@@ -70,6 +80,12 @@ pub fn run() {
             commands::teams::get_team_members,
             commands::teams::add_team_member,
             commands::teams::remove_team_member,
+
+            // Orchestrator commands
+            commands::orchestrator::start_project_execution,
+            commands::orchestrator::stop_project_execution,
+            commands::orchestrator::get_execution_status,
+            commands::orchestrator::resume_project_execution,
             
             // Usage commands
             usage::usage_cost,
@@ -117,11 +133,20 @@ pub fn run() {
             settings::toggle_debug_mode,
             settings::is_debug_mode,
             
+            // Agent metrics commands
+            agent_metrics::get_agent_usage,
+            agent_metrics::get_agent_session_stats,
+            agent_metrics::get_agent_activity,
+            agent_metrics::get_agent_tool_calls,
+            agent_metrics::log_agent_activity,
+            agent_metrics::log_agent_tool_call,
+            
             // Health check
             ping
         ])
         .manage(terminal::PtyState::default())
         .manage(GatewayClient::default())
+        .manage(Arc::new(orchestrator::OrchestratorState::default()))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

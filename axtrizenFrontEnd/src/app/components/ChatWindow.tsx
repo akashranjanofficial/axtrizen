@@ -1,3 +1,4 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   Send,
   MessageCircle,
@@ -22,6 +23,19 @@ import {
   type ConnectionStatus,
   type GatewayEvent,
 } from "../gateway-client";
+import {
+  loadAgentMemory,
+  formatMemoryContext,
+  extractMemoryUpdates,
+} from "../services/agent-memory";
+import {
+  getSmartSpeakerOrder,
+  detectConvergence,
+  parseDelegations,
+  parseReviewVerdict,
+  buildWorkerReportPrompt,
+  buildManagerReviewPrompt,
+} from "../services/discussion-engine";
 import { agentStore } from "../stores/agent-store";
 import {
   getTeams,
@@ -32,6 +46,11 @@ import {
   type TeamMember,
 } from "../tauri-api";
 
+// Response entry type for discussion tracking
+type AgentResponseEntry = { name: string; text: string; agentId: string };
+
+// We keep a lightweight local representation of a "Chat"
+// It can be a Team (group chat) or an Agent (direct chat)
 // Strip gateway protocol tags from message content
 function sanitizeMessageContent(text: string): string {
   return text
@@ -39,7 +58,216 @@ function sanitizeMessageContent(text: string): string {
     .replace(/<\/?error>/gi, "")
     .replace(/<\/?thinking>/gi, "")
     .replace(/<\/?result>/gi, "")
+    .replace(/^\[(system|assistant|user)\]\s*\n?\n?/i, "")
     .trim();
+}
+
+// Parse sender info from orchestrator message patterns.
+// The Gateway prepends "[label]\n\n" to injected messages (e.g. "[system]\n\n**📨 ...")
+function parseSenderFromContent(text: string): {
+  senderName?: string;
+  senderLabel?: string;
+  cleanContent: string;
+} {
+  // Step 1: Strip the Gateway-injected [label] prefix
+  let body = text;
+  let gatewayLabel = "";
+  const labelMatch = body.match(/^\[(system|assistant|user)\]\s*\n?\n?/i);
+  if (labelMatch) {
+    gatewayLabel = labelMatch[1].toLowerCase();
+    body = body.slice(labelMatch[0].length);
+  }
+
+  // Step 2: Match orchestrator patterns on the body
+
+  // Pattern: **📨 To @AgentName:** description\n\nContent
+  const promptMatch = body.match(/^\*\*📨\s*To\s*@(\w+):\*\*\s*(.*)/s);
+  if (promptMatch) {
+    const targetAgent = promptMatch[1];
+    return {
+      senderName: "System",
+      senderLabel: "prompt",
+      cleanContent: `📨 To **@${targetAgent}**: ${promptMatch[2].trim()}`,
+    };
+  }
+
+  // Pattern: **💬 @AgentName:**\n\nresponse text
+  const responseMatch = body.match(/^\*\*💬\s*@(\w+):\*\*\s*\n?\n?([\s\S]*)/);
+  if (responseMatch) {
+    return {
+      senderName: responseMatch[1],
+      senderLabel: "assistant",
+      cleanContent: responseMatch[2].trim(),
+    };
+  }
+
+  // Pattern: **📣 @AgentName:** (alternative response format)
+  const altResponseMatch = body.match(/^\*\*📣\s*@(\w+):\*\*\s*\n?\n?([\s\S]*)/);
+  if (altResponseMatch) {
+    return {
+      senderName: altResponseMatch[1],
+      senderLabel: "assistant",
+      cleanContent: altResponseMatch[2].trim(),
+    };
+  }
+
+  // Pattern: Manager review — contains APPROVED or REVISION NEEDED near start
+  if (body.match(/^(\*\*)?APPROVED/i) || body.match(/^(\*\*)?REVISION/i)) {
+    return {
+      senderName: "Manager",
+      senderLabel: "review",
+      cleanContent: body,
+    };
+  }
+
+  // Pattern: Phase announcements — starts with emoji (✅🚀🔄📋⚙️🧪)
+  const phaseMatch = body.match(/^[✅🚀🔄📋⚙️🧪🏁]/u);
+  if (phaseMatch) {
+    return {
+      senderName: "System",
+      senderLabel: "phase",
+      cleanContent: body,
+    };
+  }
+
+  // Pattern: Group discussion — **@AgentName**: response text
+  const groupResponseMatch = body.match(/^\*\*@(\w+)\*\*:\s*([\s\S]*)/);
+  if (groupResponseMatch) {
+    return {
+      senderName: groupResponseMatch[1],
+      senderLabel: "assistant",
+      cleanContent: groupResponseMatch[2].trim(),
+    };
+  }
+
+  // Pattern: Group discussion — **@AgentName** → @SenderName: response
+  const routedMatch = body.match(/^\*\*@(\w+)\*\*\s*→\s*@\w+:\s*([\s\S]*)/);
+  if (routedMatch) {
+    return {
+      senderName: routedMatch[1],
+      senderLabel: "assistant",
+      cleanContent: body, // Keep full content with routing info
+    };
+  }
+
+  // Pattern: Group summary — 📋 **Final Plan by @AgentName**:
+  const summaryMatch = body.match(/^📋\s*\*\*Final Plan by @(\w+)\*\*:\s*([\s\S]*)/);
+  if (summaryMatch) {
+    return {
+      senderName: summaryMatch[1],
+      senderLabel: "assistant",
+      cleanContent: body,
+    };
+  }
+
+  // Pattern: Delegation — 🔨 **@AgentName** completed/revised
+  const delegationMatch = body.match(/^🔨\s*\*\*@(\w+)\*\*\s*(completed|revised)/);
+  if (delegationMatch) {
+    return {
+      senderName: delegationMatch[1],
+      senderLabel: "assistant",
+      cleanContent: body,
+    };
+  }
+
+  // Pattern: Review — ✅ **@AgentName** approved / 🔄 **@AgentName** requested
+  const reviewMatch = body.match(/^[✅🔄🔍]\s*\*\*@(\w+)\*\*\s*(approved|requested)/);
+  if (reviewMatch) {
+    return {
+      senderName: reviewMatch[1],
+      senderLabel: "review",
+      cleanContent: body,
+    };
+  }
+
+  // Pattern: Convergence — ✅ **Discussion converged**
+  if (body.startsWith("✅ **Discussion converged**")) {
+    return {
+      senderName: "System",
+      senderLabel: "system",
+      cleanContent: body,
+    };
+  }
+
+  // Step 3: If we have a Gateway label but no orchestrator pattern, use the label
+  if (gatewayLabel === "system") {
+    return {
+      senderName: "System",
+      senderLabel: "system",
+      cleanContent: body,
+    };
+  }
+
+  // No pattern matched — return cleaned content without [label] prefix
+  return { cleanContent: body };
+}
+
+// Deterministic color for each agent name — same agent always gets the same color
+const AGENT_COLORS = [
+  {
+    bg: "bg-blue-500/20",
+    text: "text-blue-400",
+    border: "border-blue-500/30",
+    accent: "bg-blue-500",
+  },
+  {
+    bg: "bg-purple-500/20",
+    text: "text-purple-400",
+    border: "border-purple-500/30",
+    accent: "bg-purple-500",
+  },
+  {
+    bg: "bg-emerald-500/20",
+    text: "text-emerald-400",
+    border: "border-emerald-500/30",
+    accent: "bg-emerald-500",
+  },
+  {
+    bg: "bg-orange-500/20",
+    text: "text-orange-400",
+    border: "border-orange-500/30",
+    accent: "bg-orange-500",
+  },
+  {
+    bg: "bg-pink-500/20",
+    text: "text-pink-400",
+    border: "border-pink-500/30",
+    accent: "bg-pink-500",
+  },
+  {
+    bg: "bg-cyan-500/20",
+    text: "text-cyan-400",
+    border: "border-cyan-500/30",
+    accent: "bg-cyan-500",
+  },
+  {
+    bg: "bg-amber-500/20",
+    text: "text-amber-400",
+    border: "border-amber-500/30",
+    accent: "bg-amber-500",
+  },
+  {
+    bg: "bg-indigo-500/20",
+    text: "text-indigo-400",
+    border: "border-indigo-500/30",
+    accent: "bg-indigo-500",
+  },
+];
+
+function getAgentColor(name: string) {
+  if (name === "System" || name === "Manager") {
+    return {
+      bg: "bg-muted",
+      text: "text-muted-foreground",
+      border: "border-border",
+      accent: "bg-muted-foreground",
+    };
+  }
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length];
 }
 
 // Chat target type
@@ -93,6 +321,18 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   const clientRef = useRef(getGatewayClient());
   const messageStoreRef = useRef<Map<string, ChatMessage[]>>(new Map());
 
+  // Refs for websocket event handlers to access current state
+  const selectedAgentRef = useRef(selectedAgent);
+  const selectedTeamRef = useRef(selectedTeam);
+
+  useEffect(() => {
+    selectedAgentRef.current = selectedAgent;
+  }, [selectedAgent]);
+
+  useEffect(() => {
+    selectedTeamRef.current = selectedTeam;
+  }, [selectedTeam]);
+
   // Pin/unpin helper with localStorage persistence
   const togglePin = (chatKey: string) => {
     setPinnedChats((prev) => {
@@ -109,13 +349,28 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
   // Delete a chat (agent or team)
   const handleDeleteChat = async (type: "agent" | "team", id: string) => {
-    if (!confirm(`Remove this ${type === "team" ? "team chat" : "agent chat"}?`)) {
+    const isConfirmed = await confirm(
+      `Remove this ${type === "team" ? "team chat" : "agent chat"}?`,
+      {
+        title: "Delete Chat",
+        kind: "warning",
+      },
+    );
+
+    if (!isConfirmed) {
       return;
     }
     try {
       if (type === "agent") {
         await deleteTauriAgent(id);
         setAgents((prev) => prev.filter((a) => a.id !== id));
+        // Clear all cached state for this chat
+        messageStoreRef.current.delete(id);
+        setLastMessages((prev) => {
+          const next = new Map(prev);
+          next.delete(id);
+          return next;
+        });
         if (selectedAgent?.id === id) {
           setSelectedAgent(null);
           setMessages([]);
@@ -125,6 +380,14 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       } else {
         await deleteTauriTeam(id);
         setTeams((prev) => prev.filter((t) => t.id !== id));
+        // Clear all cached state for this team chat
+        const teamChatKey = `team:${id}`;
+        messageStoreRef.current.delete(teamChatKey);
+        setLastMessages((prev) => {
+          const next = new Map(prev);
+          next.delete(teamChatKey);
+          return next;
+        });
         if (selectedTeam?.id === id) {
           setSelectedTeam(null);
           setMessages([]);
@@ -248,16 +511,90 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
     client.onEvent = (evt: GatewayEvent) => {
       // Handle streaming chat events
-      if (evt.event === "chat.token" || evt.event === "chat.delta") {
-        const payload = evt.payload as { text?: string } | undefined;
-        if (payload?.text) {
+      if (evt.event === "chat") {
+        const payload = evt.payload as
+          | {
+              state?: string;
+              sessionKey?: string;
+              message?: { content?: { type: string; text: string }[] };
+            }
+          | undefined;
+
+        const activeTeam = selectedTeamRef.current;
+        const activeAgent = selectedAgentRef.current;
+        const expectedSessionKey = activeTeam
+          ? `team:${activeTeam.id}:group`
+          : activeAgent
+            ? `agent:${activeAgent.id}:main`
+            : null;
+
+        // Prevent cross-talk: only inject streams meant for the currently open window
+        if (
+          payload?.sessionKey &&
+          expectedSessionKey &&
+          payload.sessionKey !== expectedSessionKey
+        ) {
+          return;
+        }
+
+        if (payload?.state === "delta" && payload?.message?.content?.[0]?.text) {
+          const text = payload.message.content[0].text;
           setMessages((prev) => {
             const last = prev[prev.length - 1];
             if (last && last.role === "assistant" && last.status === "sending") {
-              return [...prev.slice(0, -1), { ...last, content: last.content + payload.text }];
+              return [...prev.slice(0, -1), { ...last, content: last.content + text }];
             }
             return prev;
           });
+        }
+
+        // Handle injected messages (chat.inject broadcasts state: "final")
+        if (payload?.state === "final" && payload?.message) {
+          const msg = payload.message as {
+            role?: string;
+            content?: Array<{ type: string; text?: string }> | string;
+            timestamp?: number;
+          };
+          let text = "";
+          if (typeof msg.content === "string") {
+            text = msg.content;
+          } else if (Array.isArray(msg.content)) {
+            text = msg.content
+              .filter((c) => c.type === "text" && c.text)
+              .map((c) => c.text)
+              .join("\n");
+          }
+          if (text) {
+            const sanitized = sanitizeMessageContent(text);
+            const parsed = parseSenderFromContent(sanitized);
+            const newMsg: ChatMessage = {
+              id: `injected-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              role: (msg.role as ChatMessage["role"]) || "assistant",
+              content: parsed.cleanContent,
+              timestamp: msg.timestamp ?? Date.now(),
+              status: "sent",
+              senderName: parsed.senderName,
+              senderLabel: parsed.senderLabel,
+            };
+            setMessages((prev) => {
+              // Don't add duplicates (check if same content was just added)
+              const last = prev[prev.length - 1];
+              if (
+                last &&
+                last.content === newMsg.content &&
+                Math.abs(last.timestamp - newMsg.timestamp) < 2000
+              ) {
+                return prev;
+              }
+              return [...prev, newMsg];
+            });
+
+            // Auto-scroll
+            setTimeout(() => {
+              const el = document.querySelector('[data-testid="messages-container"]');
+              el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            }, 100);
+          }
         }
       }
     };
@@ -360,6 +697,75 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     }
   }, []);
 
+  // Load chat history from gateway for a team group chat
+  const loadGroupChatHistory = useCallback(async (teamId: string) => {
+    try {
+      const client = clientRef.current;
+      if (client.status !== "connected") {
+        return;
+      }
+
+      const sessionKey = `team:${teamId}:group`;
+      const result = await client.getChatHistory(sessionKey);
+
+      if (result.messages && result.messages.length > 0) {
+        const parsed: ChatMessage[] = result.messages
+          .filter((msg) => {
+            // Skip tool role messages
+            if (msg.role === "tool") {
+              return false;
+            }
+            // Keep all other messages including system-labeled ones (orchestration)
+            return true;
+          })
+          .map((msg, idx) => {
+            let text = "";
+            if (typeof msg.content === "string") {
+              text = msg.content;
+            } else if (Array.isArray(msg.content)) {
+              text = msg.content
+                .filter((c) => c.type === "text" && c.text)
+                .map((c) => c.text)
+                .join("\n");
+            }
+            const sanitized = sanitizeMessageContent(text);
+            const parsed = parseSenderFromContent(sanitized);
+            return {
+              id: `group-${idx}-${msg.timestamp ?? idx}`,
+              role: msg.role as ChatMessage["role"],
+              content: parsed.cleanContent,
+              timestamp: msg.timestamp ?? Date.now(),
+              status: "sent" as const,
+              senderName: parsed.senderName,
+              senderLabel: parsed.senderLabel,
+            };
+          })
+          .filter((msg) => {
+            if (!msg.content) {
+              return false;
+            }
+            const trimmed = msg.content.trim();
+            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+              try {
+                JSON.parse(trimmed);
+                return false;
+              } catch {
+                /* keep */
+              }
+            }
+            return true;
+          });
+        setMessages(parsed);
+        messageStoreRef.current.set(`team:${teamId}`, parsed);
+      } else {
+        setMessages([]);
+      }
+    } catch (err) {
+      console.warn("Failed to load group chat history:", err);
+      setMessages(messageStoreRef.current.get(`team:${teamId}`) || []);
+    }
+  }, []);
+
   const loadAgents = useCallback(async () => {
     try {
       const client = clientRef.current;
@@ -402,19 +808,6 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     setMessageInput("");
     setIsAgentThinking(true);
     setError(null);
-
-    // Add placeholder for assistant response
-    const assistantMsgId = `assistant-${Date.now()}`;
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: assistantMsgId,
-        role: "assistant",
-        content: "",
-        timestamp: Date.now(),
-        status: "sending",
-      },
-    ]);
 
     try {
       const client = clientRef.current;
@@ -465,49 +858,152 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       // 1. Inject user's message into group chat transcript natively (only once)
       if (isGroupChatTag && groupSessionKey) {
         client
-          .chatInject(groupSessionKey, body)
+          .chatInject(groupSessionKey, body, "user")
           .catch((e) => console.warn("Failed to inject user msg", e));
       }
 
       const assistantMsgIds = targetAgents.map((a) => `${Date.now()}-${a.id}`);
 
       // Create a placeholder message for each targeted agent
+      // Note: For group discussions, these will be recreated after smart ordering
       const placeholders: ChatMessage[] = targetAgents.map((agent, i) => ({
         id: assistantMsgIds[i],
         role: "assistant",
-        content: isGroupChatTag ? `Waiting for @${agent.name || agent.id}...` : "Thinking...",
+        content: isGroupChatTag ? `⏳ Waiting for @${agent.name || agent.id}...` : "Thinking...",
         timestamp: Date.now() + i,
         status: "sending",
       }));
 
-      setMessages((prev) => [...prev, userMsg, ...placeholders]);
+      // Append placeholders (userMsg was already added above)
+      setMessages((prev) => [...prev, ...placeholders]);
 
-      // 2. Send message to target agents in parallel
-      await Promise.allSettled(
-        targetAgents.map(async (agent, idx) => {
-          const msgId = assistantMsgIds[idx];
-          const agentSessionKey = `agent:${agent.id}:main`;
+      // Helper: extract response text from agent response
+      const extractResponseText = (response: any): string => {
+        const payloads = response.result?.payloads ?? [];
+        return (
+          payloads
+            .map((p: any) => p.text)
+            .filter(Boolean)
+            .join("\n") ||
+          response.summary ||
+          "No reply from agent."
+        );
+      };
+
+      if (isGroupChatTag && targetAgents.length >= 2) {
+        // ── ENTERPRISE SEQUENTIAL DISCUSSION MODE ──
+        // Features: Smart Speaker Selection, Convergence Detect, Agent Memory, Delegation
+
+        // Build agent lookup for @mention routing
+        const agentLookup = new Map<string, (typeof targetAgents)[0]>();
+        for (const a of agents) {
+          const name = (a.name || a.id).toLowerCase();
+          agentLookup.set(name, a);
+        }
+
+        // Detect @mentions in text and return matching agents (excluding sender)
+        const detectMentions = (text: string, senderId: string): typeof targetAgents => {
+          const mentioned: typeof targetAgents = [];
+          const lower = text.toLowerCase();
+          for (const [name, agent] of agentLookup) {
+            if (agent.id !== senderId && lower.includes(`@${name}`)) {
+              mentioned.push(agent);
+            }
+          }
+          return mentioned;
+        };
+
+        // ── 1. SMART SPEAKER SELECTION ──
+        // Order agents by relevance to the topic instead of fixed order
+        const discussionAgents = targetAgents.map((a) => ({
+          id: a.id,
+          name: a.name || a.id,
+          role: (a as any).role || a.name || "",
+        }));
+        const smartOrder = getSmartSpeakerOrder(discussionAgents, body);
+        const orderedAgents = smartOrder
+          .map((sa) => targetAgents.find((ta) => ta.id === sa.id))
+          .filter(Boolean) as typeof targetAgents;
+
+        // Recreate placeholders in smart order so UI shows correct sequence
+        const orderedMsgIds = orderedAgents.map((a) => {
+          const origIdx = targetAgents.findIndex((ta) => ta.id === a.id);
+          return origIdx >= 0 ? assistantMsgIds[origIdx] : `${Date.now()}-${a.id}`;
+        });
+        setMessages((prev) => {
+          // Remove old placeholders and add new ones in smart order
+          const withoutPlaceholders = prev.filter((m) => !assistantMsgIds.includes(m.id));
+          const newPlaceholders = orderedAgents.map((agent, i) => ({
+            id: orderedMsgIds[i],
+            role: "assistant" as const,
+            content: `⏳ [${i + 1}/${orderedAgents.length}] Waiting for @${agent.name || agent.id}...`,
+            timestamp: Date.now() + i,
+            status: "sending" as const,
+          }));
+          return [...withoutPlaceholders, ...newPlaceholders];
+        });
+
+        let discussionTranscript = body;
+        const agentResponses: AgentResponseEntry[] = [];
+
+        for (let idx = 0; idx < orderedAgents.length; idx++) {
+          const agent = orderedAgents[idx];
+          const msgId = orderedMsgIds[idx];
+          const agentSessionKey = selectedTeam
+            ? `group:${selectedTeam.id}:${agent.id}`
+            : `agent:${agent.id}:main`;
           const taggedAgentName = agent.name || agent.id;
 
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId
+                ? {
+                    ...m,
+                    content: `💭 @${taggedAgentName} is thinking...`,
+                    status: "sending" as const,
+                  }
+                : m,
+            ),
+          );
+
           try {
-            const response = await client.sendAgentMessage(body, agent.id, agentSessionKey);
+            // ── 3. AGENT MEMORY — load persistent context ──
+            const memory = loadAgentMemory(agent.id);
+            const memoryContext = formatMemoryContext(memory);
 
-            // Build response text from payloads
-            const payloads = response.result?.payloads ?? [];
-            const responseText =
-              payloads
-                .map((p) => p.text)
-                .filter(Boolean)
-                .join("\n") ||
-              response.summary ||
-              "No reply from agent.";
+            let contextPrompt = body;
+            if (agentResponses.length > 0) {
+              const prevResponses = agentResponses
+                .map((r) => `**@${r.name}** said:\n${r.text}`)
+                .join("\n\n---\n\n");
+              contextPrompt = `${body}\n\n---\n\n**Discussion so far:**\n\n${prevResponses}\n\n---\n\nNow it's your turn, @${taggedAgentName}. Build on what your teammates said above. Add your perspective and expertise. If you need input from a specific teammate, @mention them.`;
+            }
 
-            const finalResponseText = isGroupChatTag
-              ? `**@${taggedAgentName}**: ${responseText}`
-              : responseText;
+            // Inject memory into prompt
+            if (memoryContext) {
+              contextPrompt += memoryContext;
+            }
 
-            // 3. Inject assistant's response back into group chat transcript
-            if (isGroupChatTag && groupSessionKey) {
+            const response = await client.sendAgentMessage(
+              contextPrompt,
+              agent.id,
+              agentSessionKey,
+            );
+
+            let responseText = extractResponseText(response);
+
+            // ── 3. AGENT MEMORY — extract and save memory updates ──
+            const memResult = extractMemoryUpdates(agent.id, responseText);
+            if (memResult.updated) {
+              responseText = memResult.cleanText;
+            }
+
+            const finalResponseText = `**@${taggedAgentName}**: ${responseText}`;
+
+            agentResponses.push({ name: taggedAgentName, text: responseText, agentId: agent.id });
+            discussionTranscript += `\n\n**@${taggedAgentName}**: ${responseText}`;
+
+            if (groupSessionKey) {
               await client
                 .chatInject(groupSessionKey, finalResponseText, "assistant")
                 .catch((e) => console.warn("Failed to inject response msg", e));
@@ -532,14 +1028,485 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               ),
             );
           }
-        }),
-      );
+        }
+
+        // ── SUMMARY ROUND with DELEGATION ──
+        if (agentResponses.length >= 2) {
+          const summaryAgent = orderedAgents[0];
+          const summaryAgentName = summaryAgent.name || summaryAgent.id;
+          const summaryMsgId = `summary-${Date.now()}`;
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: summaryMsgId,
+              role: "assistant" as const,
+              content: `📋 @${summaryAgentName} is synthesizing the final plan...`,
+              timestamp: Date.now(),
+              status: "sending" as const,
+            },
+          ]);
+
+          try {
+            const allResponses = agentResponses
+              .map((r) => `**@${r.name}**:\n${r.text}`)
+              .join("\n\n---\n\n");
+
+            const summaryPrompt = `The team just discussed: "${body}"\n\nHere are all responses:\n\n${allResponses}\n\n---\n\nAs the lead, synthesize everyone's input into a **clear, actionable final plan**. Highlight agreements, resolve any conflicts, and list concrete next steps. If you need a specific agent to do something, @mention them with their task (e.g., "@Frontend: build the upload component").`;
+
+            const summaryResponse = await client.sendAgentMessage(
+              summaryPrompt,
+              summaryAgent.id,
+              selectedTeam
+                ? `group:${selectedTeam.id}:${summaryAgent.id}`
+                : `agent:${summaryAgent.id}:main`,
+            );
+
+            let summaryText = extractResponseText(summaryResponse);
+
+            // Extract memory from summary
+            const summaryMem = extractMemoryUpdates(summaryAgent.id, summaryText);
+            if (summaryMem.updated) {
+              summaryText = summaryMem.cleanText;
+            }
+
+            const finalSummary = `📋 **Final Plan by @${summaryAgentName}**:\n\n${summaryText}`;
+
+            agentResponses.push({
+              name: summaryAgentName,
+              text: summaryText,
+              agentId: summaryAgent.id,
+            });
+            discussionTranscript += `\n\n📋 **Final Plan by @${summaryAgentName}**:\n\n${summaryText}`;
+
+            if (groupSessionKey) {
+              await client
+                .chatInject(groupSessionKey, finalSummary, "assistant")
+                .catch((e) => console.warn("Failed to inject summary", e));
+            }
+
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === summaryMsgId
+                  ? { ...m, content: finalSummary, status: "sent" as const }
+                  : m,
+              ),
+            );
+
+            // ── 4. HIERARCHICAL DELEGATION ──
+            // Parse manager's summary for task assignments
+            const delegationAgents = orderedAgents.map((a) => ({
+              id: a.id,
+              name: a.name || a.id,
+              role: (a as any).role || a.name || "",
+            }));
+            const delegations = parseDelegations(summaryText, delegationAgents, summaryAgent.id);
+
+            if (delegations.length > 0) {
+              const MAX_REVISIONS = 2;
+
+              for (const delegation of delegations) {
+                const worker = orderedAgents.find((a) => a.id === delegation.assignedTo.id);
+                if (!worker) {
+                  continue;
+                }
+
+                const workerName = worker.name || worker.id;
+                const delegMsgId = `deleg-${Date.now()}-${worker.id}`;
+
+                // Show delegation status
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: delegMsgId,
+                    role: "assistant" as const,
+                    content: `🔨 @${workerName} is working on: "${delegation.taskDescription}"...`,
+                    timestamp: Date.now(),
+                    status: "sending" as const,
+                  },
+                ]);
+
+                try {
+                  const workerPrompt = buildWorkerReportPrompt(delegation, discussionTranscript);
+                  const workerResponse = await client.sendAgentMessage(
+                    workerPrompt,
+                    worker.id,
+                    selectedTeam
+                      ? `group:${selectedTeam.id}:${worker.id}`
+                      : `agent:${worker.id}:main`,
+                  );
+
+                  let workerText = extractResponseText(workerResponse);
+                  const workerMem = extractMemoryUpdates(worker.id, workerText);
+                  if (workerMem.updated) {
+                    workerText = workerMem.cleanText;
+                  }
+
+                  const workerFinal = `🔨 **@${workerName}** completed task:\n\n${workerText}`;
+
+                  agentResponses.push({ name: workerName, text: workerText, agentId: worker.id });
+                  discussionTranscript += `\n\n${workerFinal}`;
+
+                  if (groupSessionKey) {
+                    await client
+                      .chatInject(groupSessionKey, workerFinal, "assistant")
+                      .catch((e) => console.warn("Failed to inject delegation result", e));
+                  }
+
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === delegMsgId
+                        ? { ...m, content: workerFinal, status: "sent" as const }
+                        : m,
+                    ),
+                  );
+
+                  // ── Manager Review Loop ──
+                  let currentOutput = workerText;
+                  let approvedByManager = false;
+
+                  for (let rev = 0; rev < MAX_REVISIONS && !approvedByManager; rev++) {
+                    const reviewMsgId = `review-${Date.now()}-${worker.id}`;
+
+                    setMessages((prev) => [
+                      ...prev,
+                      {
+                        id: reviewMsgId,
+                        role: "assistant" as const,
+                        content: `🔍 @${summaryAgentName} is reviewing @${workerName}'s work...`,
+                        timestamp: Date.now(),
+                        status: "sending" as const,
+                      },
+                    ]);
+
+                    const reviewPrompt = buildManagerReviewPrompt(delegation, currentOutput);
+                    const reviewResponse = await client.sendAgentMessage(
+                      reviewPrompt,
+                      summaryAgent.id,
+                      selectedTeam
+                        ? `group:${selectedTeam.id}:${summaryAgent.id}`
+                        : `agent:${summaryAgent.id}:main`,
+                    );
+
+                    const reviewText = extractResponseText(reviewResponse);
+                    const verdict = parseReviewVerdict(reviewText);
+
+                    if (verdict.approved) {
+                      approvedByManager = true;
+                      const approvedMsg = `✅ **@${summaryAgentName}** approved @${workerName}'s work:\n\n${reviewText}`;
+
+                      if (groupSessionKey) {
+                        await client
+                          .chatInject(groupSessionKey, approvedMsg, "assistant")
+                          .catch((e) => console.warn("Failed to inject review", e));
+                      }
+
+                      setMessages((prev) =>
+                        prev.map((m) =>
+                          m.id === reviewMsgId
+                            ? { ...m, content: approvedMsg, status: "sent" as const }
+                            : m,
+                        ),
+                      );
+                    } else {
+                      // Request revision
+                      const revisionMsg = `🔄 **@${summaryAgentName}** requested revision from @${workerName}:\n\n${reviewText}`;
+
+                      if (groupSessionKey) {
+                        await client
+                          .chatInject(groupSessionKey, revisionMsg, "assistant")
+                          .catch((e) => console.warn("Failed to inject review", e));
+                      }
+
+                      setMessages((prev) =>
+                        prev.map((m) =>
+                          m.id === reviewMsgId
+                            ? { ...m, content: revisionMsg, status: "sent" as const }
+                            : m,
+                        ),
+                      );
+
+                      // Worker revises
+                      const reviseMsgId = `revise-${Date.now()}-${worker.id}`;
+                      setMessages((prev) => [
+                        ...prev,
+                        {
+                          id: reviseMsgId,
+                          role: "assistant" as const,
+                          content: `🔨 @${workerName} is revising based on feedback...`,
+                          timestamp: Date.now(),
+                          status: "sending" as const,
+                        },
+                      ]);
+
+                      const revisePrompt = `Your manager @${summaryAgentName} reviewed your work and requested changes:\n\n"${reviewText}"\n\nYour previous output:\n${currentOutput}\n\nPlease revise your work based on the feedback.`;
+
+                      const reviseResponse = await client.sendAgentMessage(
+                        revisePrompt,
+                        worker.id,
+                        selectedTeam
+                          ? `group:${selectedTeam.id}:${worker.id}`
+                          : `agent:${worker.id}:main`,
+                      );
+
+                      currentOutput = extractResponseText(reviseResponse);
+                      const reviseFinal = `🔨 **@${workerName}** revised (round ${rev + 2}):\n\n${currentOutput}`;
+
+                      if (groupSessionKey) {
+                        await client
+                          .chatInject(groupSessionKey, reviseFinal, "assistant")
+                          .catch((e) => console.warn("Failed to inject revision", e));
+                      }
+
+                      setMessages((prev) =>
+                        prev.map((m) =>
+                          m.id === reviseMsgId
+                            ? { ...m, content: reviseFinal, status: "sent" as const }
+                            : m,
+                        ),
+                      );
+                    }
+                  }
+                } catch (err) {
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === delegMsgId
+                        ? {
+                            ...m,
+                            content: `⚠️ Delegation error: ${errMsg}`,
+                            status: "error" as const,
+                          }
+                        : m,
+                    ),
+                  );
+                }
+              }
+            }
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === summaryMsgId
+                  ? { ...m, content: `⚠️ Summary error: ${errMsg}`, status: "error" as const }
+                  : m,
+              ),
+            );
+          }
+        }
+
+        // ── @MENTION AUTO-ROUTING with CONVERGENCE DETECTION ──
+        const MAX_AUTO_ROUTE_DEPTH = 5;
+        let routeDepth = 0;
+        const processedPairs = new Set<string>();
+        const convergedAgentIds = new Set<string>();
+
+        let pendingMentions: Array<{
+          sender: (typeof targetAgents)[0];
+          target: (typeof targetAgents)[0];
+          senderResponse: string;
+        }> = [];
+
+        // Scan all responses for @mentions
+        for (const resp of agentResponses) {
+          const mentioned = detectMentions(resp.text, resp.agentId);
+          for (const target of mentioned) {
+            const pairKey = `${resp.agentId}->${target.id}`;
+            if (!processedPairs.has(pairKey)) {
+              const sender = agents.find((a) => a.id === resp.agentId);
+              if (sender) {
+                pendingMentions.push({ sender, target, senderResponse: resp.text });
+                processedPairs.add(pairKey);
+              }
+            }
+          }
+        }
+
+        while (pendingMentions.length > 0 && routeDepth < MAX_AUTO_ROUTE_DEPTH) {
+          // ── 2. CONVERGENCE DETECTION ──
+          const convergence = detectConvergence(
+            agentResponses.map((r) => ({
+              agentId: r.agentId,
+              name: r.name,
+              text: r.text,
+              timestamp: Date.now(),
+            })),
+            orderedAgents.length,
+          );
+
+          if (convergence.converged) {
+            const convergenceMsg = `✅ **Discussion converged**: ${convergence.reason} (confidence: ${Math.round(convergence.confidence * 100)}%)`;
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `converge-${Date.now()}`,
+                role: "assistant" as const,
+                content: convergenceMsg,
+                timestamp: Date.now(),
+                status: "sent" as const,
+              },
+            ]);
+
+            if (groupSessionKey) {
+              await client
+                .chatInject(groupSessionKey, convergenceMsg, "assistant")
+                .catch((e) => console.warn("Failed to inject convergence", e));
+            }
+
+            break; // Stop routing — consensus reached
+          }
+
+          // Track converged agents for smart speaker selection
+          for (const [agentId, agreed] of convergence.agentAgreements) {
+            if (agreed) {
+              convergedAgentIds.add(agentId);
+            }
+          }
+
+          routeDepth++;
+          const nextBatch = [...pendingMentions];
+          pendingMentions = [];
+
+          for (const { sender, target, senderResponse } of nextBatch) {
+            // Skip if target already converged
+            if (convergedAgentIds.has(target.id)) {
+              continue;
+            }
+
+            const senderName = sender.name || sender.id;
+            const targetName = target.name || target.id;
+            const routeMsgId = `route-${Date.now()}-${target.id}`;
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: routeMsgId,
+                role: "assistant" as const,
+                content: `🔄 @${targetName} is responding to @${senderName}...`,
+                timestamp: Date.now(),
+                status: "sending" as const,
+              },
+            ]);
+
+            try {
+              // Load agent memory for routed response
+              const routeMemory = loadAgentMemory(target.id);
+              const routeMemContext = formatMemoryContext(routeMemory);
+
+              let routePrompt = `@${senderName} said to you:\n\n${senderResponse}\n\n---\n\n**Full discussion context:**\n\n${discussionTranscript}\n\n---\n\nRespond to @${senderName}'s message. Be specific and actionable. If you need input from another teammate, @mention them. If you agree and have nothing to add, say "I agree" or "LGTM".`;
+
+              if (routeMemContext) {
+                routePrompt += routeMemContext;
+              }
+
+              const routeResponse = await client.sendAgentMessage(
+                routePrompt,
+                target.id,
+                selectedTeam ? `group:${selectedTeam.id}:${target.id}` : `agent:${target.id}:main`,
+              );
+
+              let routeText = extractResponseText(routeResponse);
+
+              // Extract memory updates
+              const routeMem = extractMemoryUpdates(target.id, routeText);
+              if (routeMem.updated) {
+                routeText = routeMem.cleanText;
+              }
+
+              const routeFinal = `**@${targetName}** → @${senderName}: ${routeText}`;
+
+              agentResponses.push({ name: targetName, text: routeText, agentId: target.id });
+              discussionTranscript += `\n\n${routeFinal}`;
+
+              if (groupSessionKey) {
+                await client
+                  .chatInject(groupSessionKey, routeFinal, "assistant")
+                  .catch((e) => console.warn("Failed to inject routed msg", e));
+              }
+
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === routeMsgId ? { ...m, content: routeFinal, status: "sent" as const } : m,
+                ),
+              );
+
+              // Check for new mentions to continue the chain
+              const newMentions = detectMentions(routeText, target.id);
+              for (const nextTarget of newMentions) {
+                const nextPair = `${target.id}->${nextTarget.id}`;
+                if (!processedPairs.has(nextPair)) {
+                  pendingMentions.push({
+                    sender: target,
+                    target: nextTarget,
+                    senderResponse: routeText,
+                  });
+                  processedPairs.add(nextPair);
+                }
+              }
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === routeMsgId
+                    ? { ...m, content: `⚠️ Route error: ${errMsg}`, status: "error" as const }
+                    : m,
+                ),
+              );
+            }
+          }
+        }
+      } else {
+        // ── SINGLE AGENT MODE (unchanged) ──
+        await Promise.allSettled(
+          targetAgents.map(async (agent, idx) => {
+            const msgId = assistantMsgIds[idx];
+            const agentSessionKey = `agent:${agent.id}:main`;
+            const taggedAgentName = agent.name || agent.id;
+
+            try {
+              const response = await client.sendAgentMessage(body, agent.id, agentSessionKey);
+              const responseText = extractResponseText(response);
+
+              const finalResponseText = isGroupChatTag
+                ? `**@${taggedAgentName}**: ${responseText}`
+                : responseText;
+
+              if (isGroupChatTag && groupSessionKey) {
+                await client
+                  .chatInject(groupSessionKey, finalResponseText, "assistant")
+                  .catch((e) => console.warn("Failed to inject response msg", e));
+              }
+
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId
+                    ? { ...m, content: finalResponseText, status: "sent" as const }
+                    : m,
+                ),
+              );
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === msgId
+                    ? {
+                        ...m,
+                        content: `⚠️ Error from @${taggedAgentName}: ${errMsg}`,
+                        status: "error" as const,
+                      }
+                    : m,
+                ),
+              );
+            }
+          }),
+        );
+      }
     } catch (err) {
       // Catch overall errors (e.g., failed to find tags)
       const errMsg = err instanceof Error ? err.message : String(err);
       setMessages((prev) => [
         ...prev,
-        userMsg,
         {
           id: Date.now().toString(),
           role: "assistant",
@@ -557,18 +1524,51 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
   // Clear/delete the current chat history
   const handleClearChat = async () => {
-    if (!selectedAgent) {
+    if (!selectedAgent && !selectedTeam) {
       return;
     }
-    const sessionKey = `agent:${selectedAgent.id}:main`;
-    try {
-      await clientRef.current.resetSession(sessionKey);
-    } catch (err) {
-      console.warn("Failed to reset session on gateway:", err);
+
+    const chatKey = selectedTeam
+      ? `team:${selectedTeam.id}`
+      : selectedAgent
+        ? `agent:${selectedAgent.id}`
+        : null;
+
+    if (selectedAgent) {
+      const sessionKey = `agent:${selectedAgent.id}:main`;
+      try {
+        await clientRef.current.resetSession(sessionKey);
+      } catch (err) {
+        console.warn("Failed to reset session on gateway:", err);
+      }
+      // Clear local messages
+      messageStoreRef.current.set(selectedAgent.id, []);
+    } else if (selectedTeam) {
+      const sessionKey = `team:${selectedTeam.id}:main`;
+      try {
+        await clientRef.current.resetSession(sessionKey);
+      } catch (err) {
+        console.warn("Failed to reset team session on gateway:", err);
+      }
+      messageStoreRef.current.set(selectedTeam.id, []);
     }
-    // Clear local messages
-    messageStoreRef.current.set(selectedAgent.id, []);
+
+    // Clear displayed messages
     setMessages([]);
+
+    // Clear sidebar preview text and unread count
+    if (chatKey) {
+      setLastMessages((prev) => {
+        const next = new Map(prev);
+        next.delete(chatKey);
+        return next;
+      });
+      setUnreadCounts((prev) => {
+        const next = new Map(prev);
+        next.delete(chatKey);
+        return next;
+      });
+    }
   };
 
   // @mention autocomplete logic
@@ -762,7 +1762,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                         }
                         setSelectedAgent(null);
                         setSelectedTeam(team);
-                        setMessages(messageStoreRef.current.get(chatKey) || []);
+                        // Load group chat history from Gateway (includes orchestration messages)
+                        loadGroupChatHistory(team.id);
                         // Clear unread
                         setUnreadCounts((prev) => {
                           const n = new Map(prev);
@@ -1099,48 +2100,122 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              <div
-                className={`max-w-[75%] rounded-2xl px-4 py-3 ${
-                  msg.role === "user"
-                    ? "bg-primary text-primary-foreground rounded-br-md"
-                    : msg.status === "error"
-                      ? "bg-red-500/10 border border-red-500/30 text-red-400 rounded-bl-md"
-                      : "bg-muted text-foreground rounded-bl-md"
-                }`}
-              >
-                {msg.role === "assistant" && (
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <Bot className="h-3 w-3" />
-                    <span className="text-xs font-medium opacity-70">
-                      {selectedAgent?.name || "Agent"}
-                    </span>
+          {messages.map((msg) => {
+            const isUser = msg.role === "user";
+            const isGroupChat = !!selectedTeam;
+            // Extract sender name from message content patterns
+            let senderName = msg.senderName;
+            if (!senderName && !isUser) {
+              // Try to extract from **@Name**: or **@Name** → patterns
+              const nameFromContent = msg.content.match(
+                /^(?:\*\*@|📋\s*\*\*Final Plan by @|🔨\s*\*\*@|[✅🔄🔍]\s*\*\*@)(\w+)\*\*/u,
+              );
+              if (nameFromContent) {
+                senderName = nameFromContent[1];
+              } else {
+                senderName = isUser ? "You" : selectedAgent?.name || "Agent";
+              }
+            } else if (!senderName) {
+              senderName = "You";
+            }
+            const senderLabel = msg.senderLabel || msg.role;
+            const agentColor = getAgentColor(senderName);
+            const isSystemStatus = senderLabel === "phase" || senderLabel === "prompt";
+
+            // System status messages — compact centered badges
+            if (isGroupChat && isSystemStatus) {
+              return (
+                <div key={msg.id} className="flex justify-center my-2">
+                  <div className="max-w-[85%] rounded-xl px-4 py-2.5 bg-muted/50 border border-border/50 text-center">
+                    <div className="chat-markdown text-xs text-muted-foreground leading-relaxed">
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/50 mt-1">
+                      {new Date(msg.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </p>
                   </div>
-                )}
-                <div className="chat-markdown text-sm leading-relaxed">
-                  {msg.content ? (
-                    <ReactMarkdown>{sanitizeMessageContent(msg.content)}</ReactMarkdown>
-                  ) : msg.status === "sending" ? null : (
-                    <p>...</p>
+                </div>
+              );
+            }
+
+            // User messages — right aligned, primary color
+            if (isUser) {
+              return (
+                <div key={msg.id} className="flex justify-end">
+                  <div className="max-w-[75%] rounded-2xl rounded-br-md px-4 py-3 bg-primary text-primary-foreground">
+                    <div className="chat-markdown text-sm leading-relaxed">
+                      {msg.content ? (
+                        <ReactMarkdown>{sanitizeMessageContent(msg.content)}</ReactMarkdown>
+                      ) : msg.status === "sending" ? null : (
+                        <p>...</p>
+                      )}
+                    </div>
+                    <p className="text-[10px] mt-1 text-primary-foreground/50">
+                      {new Date(msg.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+
+            // Agent/assistant messages — left aligned with avatar and colored border
+            return (
+              <div key={msg.id} className="flex justify-start gap-2.5">
+                {/* Avatar */}
+                <div
+                  className={`flex h-8 w-8 items-center justify-center rounded-lg flex-shrink-0 mt-1 ${agentColor.bg}`}
+                >
+                  {senderName === "System" ? (
+                    <span className="text-xs">⚙️</span>
+                  ) : senderName === "Manager" ? (
+                    <span className="text-xs">👔</span>
+                  ) : (
+                    <Bot className={`h-4 w-4 ${agentColor.text}`} />
                   )}
                 </div>
-                <p
-                  className={`text-[10px] mt-1 ${
-                    msg.role === "user" ? "text-primary-foreground/50" : "text-muted-foreground"
+                {/* Bubble */}
+                <div
+                  className={`max-w-[70%] rounded-2xl rounded-tl-md px-4 py-3 border ${
+                    msg.status === "error"
+                      ? "bg-red-500/10 border-red-500/30 text-red-400"
+                      : isGroupChat
+                        ? `bg-card/80 ${agentColor.border}`
+                        : "bg-muted border-transparent text-foreground"
                   }`}
                 >
-                  {new Date(msg.timestamp).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </p>
+                  {/* Sender name badge */}
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className={`text-xs font-semibold ${agentColor.text}`}>{senderName}</span>
+                    {senderLabel === "review" && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-medium">
+                        review
+                      </span>
+                    )}
+                  </div>
+                  {/* Content */}
+                  <div className="chat-markdown text-sm leading-relaxed text-foreground">
+                    {msg.content ? (
+                      <ReactMarkdown>{sanitizeMessageContent(msg.content)}</ReactMarkdown>
+                    ) : msg.status === "sending" ? null : (
+                      <p>...</p>
+                    )}
+                  </div>
+                  <p className="text-[10px] mt-1.5 text-muted-foreground/60">
+                    {new Date(msg.timestamp).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </p>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {/* Thinking indicator */}
           {isAgentThinking && (

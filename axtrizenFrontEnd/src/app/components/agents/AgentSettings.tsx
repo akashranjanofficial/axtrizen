@@ -138,8 +138,52 @@ export function AgentSettings({ agent }: AgentSettingsProps) {
     setError(null);
     try {
       const path = await resolveOpenclawPath();
-      const data = await getAgentConfig(path);
-      setConfig(data);
+
+      // Load both config sources and merge them:
+      // 1. Project-local config ({openclawPath}/openclaw.json) — browser, sandbox, tts
+      // 2. Home config (~/.openclaw/openclaw.json) — channels, auth, agents, gateway, plugins
+      let localConfig: any = {};
+      let homeConfig: any = {};
+
+      try {
+        localConfig = await getAgentConfig(path);
+      } catch {
+        // Local config may not exist yet
+      }
+
+      try {
+        // getOpenClawConfig reads from ~/.openclaw/openclaw.json
+        const { getOpenClawConfig } = await import("../../tauri-api");
+        const oc = await getOpenClawConfig();
+        if (oc) {
+          homeConfig = oc;
+        }
+      } catch {
+        // Home config may not exist
+      }
+
+      // Deep merge: homeConfig is the primary source for channels/auth/gateway,
+      // localConfig overrides for browser/sandbox/tts
+      const merged = { ...homeConfig, ...localConfig };
+      // Preserve home config's channels, plugins, auth, gateway, agents sections
+      // (local config typically doesn't have these)
+      if (homeConfig.channels) {
+        merged.channels = homeConfig.channels;
+      }
+      if (homeConfig.plugins) {
+        merged.plugins = homeConfig.plugins;
+      }
+      if (homeConfig.auth) {
+        merged.auth = homeConfig.auth;
+      }
+      if (homeConfig.gateway) {
+        merged.gateway = homeConfig.gateway;
+      }
+      if (homeConfig.agents) {
+        merged.agents = homeConfig.agents;
+      }
+
+      setConfig(merged);
     } catch (err: any) {
       console.error("Failed to load config:", err);
       setError("Could not load config. Make sure the OpenClaw path is correct in Settings.");

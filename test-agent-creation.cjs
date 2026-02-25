@@ -278,6 +278,7 @@ async function run() {
     const result = await request("agents.create", {
       name: TEST_AGENT_NAME,
       workspace: TEST_WORKSPACE,
+      agentType: "manager",
     });
     if (!result.ok) {
       throw new Error("Response ok !== true");

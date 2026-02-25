@@ -8,6 +8,12 @@ vi.mock("../../app/tauri-api", () => ({
   getProjects: vi.fn(),
   createProject: vi.fn(),
   deleteProject: vi.fn(),
+  getExecutionStatus: vi
+    .fn()
+    .mockResolvedValue({ status: "idle", phase: "requirements", logs: [] }),
+  getTeams: vi.fn().mockResolvedValue([]),
+  startProjectExecution: vi.fn(),
+  stopProjectExecution: vi.fn(),
   isTauri: vi.fn(() => true),
 }));
 

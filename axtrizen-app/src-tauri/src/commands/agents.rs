@@ -88,9 +88,10 @@ pub async fn create_agent(
     name: String,
     role: Option<String>,
     working_dir: Option<String>,
+    agent_type: Option<String>,
     state: tauri::State<'_, GatewayClient>,
 ) -> Result<Value, String> {
-    println!("create_agent called with name: {}, role: {:?}, working_dir: {:?}", name, role, working_dir);
+    println!("create_agent called with name: {}, role: {:?}, working_dir: {:?}, agent_type: {:?}", name, role, working_dir, agent_type);
     
     let mut params = json!({ "name": name });
     
@@ -109,6 +110,12 @@ pub async fn create_agent(
     if let Some(r) = &role {
         if !r.trim().is_empty() {
             params["role"] = json!(r);
+        }
+    }
+
+    if let Some(at) = &agent_type {
+        if !at.trim().is_empty() {
+            params["agentType"] = json!(at);
         }
     }
     

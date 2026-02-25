@@ -1,31 +1,88 @@
 import { Terminal as TerminalIcon, Download, Trash2, Maximize2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { writePty, getSettings } from "../../tauri-api";
+import { writePty, stopAgent, getSettings, isOpenClawConfigured } from "../../tauri-api";
 import { Agent } from "../AgentsView";
-import { TerminalComponent } from "../TerminalComponent";
+import { TerminalComponent, killPtySession, type TerminalHandle } from "../TerminalComponent";
 
 interface AgentTerminalProps {
   agent: Agent;
   visible?: boolean;
 }
 
-// Track which agents have already had onboarding run
-const onboardedAgents = new Set<string>();
+// Persist onboarded agents in sessionStorage to survive page reloads
+function getOnboardedAgents(): Set<string> {
+  try {
+    const stored = sessionStorage.getItem("onboarded_agents");
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+function markOnboarded(agentId: string) {
+  const set = getOnboardedAgents();
+  set.add(agentId);
+  sessionStorage.setItem("onboarded_agents", JSON.stringify([...set]));
+}
 
 export function AgentTerminal({ agent, visible = true }: AgentTerminalProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isKilling, setIsKilling] = useState(false);
   const onboardedRef = useRef(false);
+  const termRef = useRef<TerminalHandle | null>(null);
 
-  // Auto-run onboarding command ONLY ONCE per agent
+  // Export terminal content as text file
+  const handleExport = () => {
+    const buffer = termRef.current?.getBuffer?.();
+    if (!buffer) {
+      return;
+    }
+    const blob = new Blob([buffer], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${agent.name || agent.id}-terminal-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Kill the PTY session
+  const handleKill = async () => {
+    if (!confirm(`Kill terminal session for ${agent.name || agent.id}?`)) {
+      return;
+    }
+    setIsKilling(true);
+    try {
+      await stopAgent(agent.id);
+      killPtySession(agent.id);
+    } catch (err) {
+      console.error("Failed to kill PTY:", err);
+    } finally {
+      setIsKilling(false);
+    }
+  };
+
+  // Auto-run onboarding command ONLY ONCE per agent, ONLY if not already configured
   useEffect(() => {
-    if (onboardedAgents.has(agent.id) || onboardedRef.current) {
+    if (getOnboardedAgents().has(agent.id) || onboardedRef.current) {
       return;
     }
     onboardedRef.current = true;
-    onboardedAgents.add(agent.id);
+    markOnboarded(agent.id);
 
     const timer = setTimeout(async () => {
-      console.log(`Sending initial command to agent ${agent.id}...`);
+      // Check if OpenClaw is already configured — skip onboarding if so
+      try {
+        const configured = await isOpenClawConfigured();
+        if (configured) {
+          console.log(`Agent ${agent.id}: OpenClaw already configured, skipping onboarding.`);
+          writePty(agent.id, `echo "\\x1b[32m✓ Agent ready. OpenClaw is configured.\\x1b[0m"\n`);
+          return;
+        }
+      } catch (err) {
+        console.warn("Could not check config status:", err);
+      }
+
+      console.log(`Sending initial onboarding command to agent ${agent.id}...`);
 
       let openclawDir = "~/Desktop/openclaw";
       try {
@@ -84,20 +141,27 @@ export function AgentTerminal({ agent, visible = true }: AgentTerminalProps) {
             <Maximize2 className="h-4 w-4" />
             {isExpanded ? "Minimize" : "Expand"}
           </button>
-          <button className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+          <button
+            onClick={handleExport}
+            className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
             <Download className="h-4 w-4" />
             Export
           </button>
-          <button className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50">
+          <button
+            onClick={handleKill}
+            disabled={isKilling}
+            className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50 disabled:opacity-50"
+          >
             <Trash2 className="h-4 w-4" />
-            Kill
+            {isKilling ? "Killing..." : "Kill"}
           </button>
         </div>
       </div>
 
       {/* Terminal Content - XTerm.js (always mounted, never unmounted) */}
       <div className="flex-1 rounded-2xl border border-border bg-black overflow-hidden shadow-2xl">
-        <TerminalComponent id={agent.id} className="h-full" visible={visible} />
+        <TerminalComponent ref={termRef} id={agent.id} className="h-full" visible={visible} />
       </div>
 
       {/* Helper message */}
@@ -113,5 +177,7 @@ export function AgentTerminal({ agent, visible = true }: AgentTerminalProps) {
  * Clean up onboarding tracking when an agent is deleted
  */
 export function clearAgentOnboarding(agentId: string) {
-  onboardedAgents.delete(agentId);
+  const set = getOnboardedAgents();
+  set.delete(agentId);
+  sessionStorage.setItem("onboarded_agents", JSON.stringify([...set]));
 }

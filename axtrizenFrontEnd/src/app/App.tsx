@@ -57,6 +57,47 @@ export default function App() {
     };
   }, []);
 
+  // Intercept external link clicks — open in system browser, not WebView
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement).closest("a");
+      if (!target) {
+        return;
+      }
+      const href = target.getAttribute("href");
+      if (!href) {
+        return;
+      }
+
+      // Allow in-app navigation (anchors, javascript:, etc.)
+      if (href.startsWith("#") || href.startsWith("javascript:")) {
+        return;
+      }
+
+      // Allow the app's own dev server URLs
+      if (
+        href.startsWith("http://localhost:5174") ||
+        href.startsWith("http://127.0.0.1:5174") ||
+        href.startsWith("tauri://")
+      ) {
+        return;
+      }
+
+      // External URL — prevent WebView navigation, open in system browser
+      e.preventDefault();
+      e.stopPropagation();
+      import("@tauri-apps/plugin-opener")
+        .then(({ openUrl }) => openUrl(href))
+        .catch((err) => {
+          console.warn("Failed to open URL in browser:", err);
+          window.open(href, "_blank");
+        });
+    };
+
+    document.addEventListener("click", handleClick, true);
+    return () => document.removeEventListener("click", handleClick, true);
+  }, []);
+
   // Toggle theme class on document
   useEffect(() => {
     const root = window.document.documentElement;
@@ -128,15 +169,18 @@ export default function App() {
           <ChatWindow chatTarget={chatTarget} />
         </div>
 
-        {activeMenu === "agents" ? (
+        {/* AgentsView is always mounted to preserve terminal PTY sessions */}
+        <div style={{ display: activeMenu === "agents" ? "block" : "none" }}>
           <AgentsView />
-        ) : activeMenu === "projects" ? (
+        </div>
+
+        {activeMenu === "projects" ? (
           <ProjectsView />
         ) : activeMenu === "teams" ? (
           <TeamsView onOpenGroupChat={openGroupChat} />
         ) : activeMenu === "settings" ? (
           <SettingsView />
-        ) : activeMenu !== "chat" ? (
+        ) : activeMenu !== "chat" && activeMenu !== "agents" ? (
           <>
             {/* Top Navigation */}
             <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-20">

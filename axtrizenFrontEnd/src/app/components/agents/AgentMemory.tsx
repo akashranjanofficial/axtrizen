@@ -1,5 +1,6 @@
-import { Brain, Search, Database, FileText, Trash2 } from "lucide-react";
+import { Brain, Search, Database, FileText, Trash2, Loader2, RefreshCw } from "lucide-react";
 import { useState } from "react";
+import { useAgentMetrics } from "../../hooks/useAgentMetrics";
 import { Agent } from "../AgentsView";
 
 interface AgentMemoryProps {
@@ -9,6 +10,40 @@ interface AgentMemoryProps {
 export function AgentMemory({ agent }: AgentMemoryProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"working" | "longterm">("working");
+  const [isClearing, setIsClearing] = useState(false);
+  const { metrics, loading, refresh } = useAgentMetrics(agent?.id);
+
+  const contextPct = metrics?.contextPct ?? 0;
+  const tokensIn = metrics?.tokensIn ?? 0;
+  const tokensOut = metrics?.tokensOut ?? 0;
+  const totalTokens = metrics?.totalTokens ?? 0;
+  const messageCount = metrics?.messageCount ?? 0;
+  const contextMax = metrics?.contextMaxTokens ?? 128_000;
+  const lastUpdated = metrics?.lastUpdated
+    ? new Date(metrics.lastUpdated).toLocaleTimeString()
+    : "Never";
+
+  const handleClearAll = async () => {
+    if (
+      !confirm(`Clear all memory for ${agent.name}? This will reset the agent's session context.`)
+    ) {
+      return;
+    }
+    setIsClearing(true);
+    try {
+      const { getGatewayClient } = await import("../../gateway-client");
+      const client = getGatewayClient();
+      await client.resetSession(`agent:${agent.id}:main`);
+      // Invalidate metrics cache after clearing
+      const { observabilityStore } = await import("../../stores/observability-store");
+      observabilityStore.invalidate(agent.id);
+    } catch (err) {
+      console.error("Failed to clear memory:", err);
+      alert("Failed to clear memory. The agent may need to be restarted.");
+    } finally {
+      setIsClearing(false);
+    }
+  };
 
   return (
     <div className="p-6 space-y-6">
@@ -24,10 +59,32 @@ export function AgentMemory({ agent }: AgentMemoryProps) {
           </div>
         </div>
 
-        <button className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50">
-          <Trash2 className="h-4 w-4" />
-          Clear All
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refresh}
+            disabled={loading}
+            className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            Refresh
+          </button>
+          <button
+            onClick={handleClearAll}
+            disabled={isClearing}
+            className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-destructive/20 hover:text-destructive hover:border-destructive/50 disabled:opacity-50"
+          >
+            {isClearing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            {isClearing ? "Clearing..." : "Clear All"}
+          </button>
+        </div>
       </div>
 
       {/* Memory Type Tabs */}
@@ -63,50 +120,95 @@ export function AgentMemory({ agent }: AgentMemoryProps) {
           <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-xl p-6">
             <div className="flex items-center justify-between mb-4">
               <h4 className="text-sm text-muted-foreground">Context Window</h4>
-              <span className="text-sm text-foreground">{agent.memoryLoad}% used</span>
+              <span className="text-sm text-foreground">
+                {loading ? (
+                  <Loader2 className="h-4 w-4 animate-spin inline" />
+                ) : (
+                  `${contextPct.toFixed(1)}% used`
+                )}
+              </span>
             </div>
             <div className="h-2 rounded-full bg-muted overflow-hidden mb-2">
               <div
-                className={`h-full rounded-full ${
-                  agent.memoryLoad > 80
-                    ? "bg-gradient-to-r from-destructive to-orange-500"
-                    : "bg-primary"
+                className={`h-full rounded-full transition-all duration-500 ${
+                  contextPct > 80 ? "bg-gradient-to-r from-destructive to-orange-500" : "bg-primary"
                 }`}
-                style={{ width: `${agent.memoryLoad}%` }}
+                style={{ width: `${Math.min(contextPct, 100)}%` }}
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              {agent.memoryLoad > 80 && "⚠️ High memory usage. Consider clearing old context."}
+              {contextPct > 80 && "⚠️ High memory usage. Consider clearing old context. "}
+              {totalTokens.toLocaleString()} / {contextMax.toLocaleString()} tokens · {messageCount}{" "}
+              messages
             </p>
           </div>
 
-          {/* Current Prompt Stack - Empty State */}
+          {/* Current Prompt Stack */}
           <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-xl p-6">
             <h4 className="text-foreground mb-3">Current Prompt Stack</h4>
             <div className="rounded-xl border border-border bg-black p-4">
-              <div className="flex flex-col items-center justify-center py-6 text-center">
-                <FileText className="h-10 w-10 text-muted-foreground mb-3 opacity-30" />
-                <p className="text-muted-foreground text-sm">No active context</p>
-                <p className="text-muted-foreground text-xs mt-1">
-                  Agent prompt stack will appear here when active
-                </p>
-              </div>
+              {messageCount > 0 ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-green-400 font-mono">SYSTEM</span>
+                    <span className="text-muted-foreground">~base instructions</span>
+                  </div>
+                  <div className="h-px bg-border/50" />
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-blue-400 font-mono">USER + ASSISTANT</span>
+                    <span className="text-muted-foreground">{messageCount} exchanges</span>
+                  </div>
+                  <div className="h-px bg-border/50" />
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-yellow-400 font-mono">CONTEXT</span>
+                    <span className="text-muted-foreground">
+                      {totalTokens.toLocaleString()} tokens total
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-6 text-center">
+                  <FileText className="h-10 w-10 text-muted-foreground mb-3 opacity-30" />
+                  <p className="text-muted-foreground text-sm">No active context</p>
+                  <p className="text-muted-foreground text-xs mt-1">
+                    Agent prompt stack will appear here when active
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
           {/* Quick Stats */}
           <div className="grid grid-cols-3 gap-4">
             <div className="rounded-xl border border-border bg-card/50 p-4">
-              <p className="text-xs text-muted-foreground mb-1">System Tokens</p>
-              <p className="text-xl text-foreground">0</p>
+              <p className="text-xs text-muted-foreground mb-1">Input Tokens</p>
+              <p className="text-xl text-foreground">
+                {loading ? (
+                  <Loader2 className="h-5 w-5 animate-spin inline" />
+                ) : (
+                  tokensIn.toLocaleString()
+                )}
+              </p>
             </div>
             <div className="rounded-xl border border-border bg-card/50 p-4">
-              <p className="text-xs text-muted-foreground mb-1">User Tokens</p>
-              <p className="text-xl text-foreground">0</p>
+              <p className="text-xs text-muted-foreground mb-1">Output Tokens</p>
+              <p className="text-xl text-foreground">
+                {loading ? (
+                  <Loader2 className="h-5 w-5 animate-spin inline" />
+                ) : (
+                  tokensOut.toLocaleString()
+                )}
+              </p>
             </div>
             <div className="rounded-xl border border-border bg-card/50 p-4">
-              <p className="text-xs text-muted-foreground mb-1">Assistant Tokens</p>
-              <p className="text-xl text-foreground">0</p>
+              <p className="text-xs text-muted-foreground mb-1">Total Tokens</p>
+              <p className="text-xl text-foreground">
+                {loading ? (
+                  <Loader2 className="h-5 w-5 animate-spin inline" />
+                ) : (
+                  totalTokens.toLocaleString()
+                )}
+              </p>
             </div>
           </div>
         </div>
@@ -138,23 +240,37 @@ export function AgentMemory({ agent }: AgentMemoryProps) {
 
           {/* Memory Stats */}
           <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-xl p-6">
-            <h4 className="text-foreground mb-4">Vector Database Stats</h4>
+            <h4 className="text-foreground mb-4">Session Statistics</h4>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <p className="text-xs text-muted-foreground mb-1">Total Embeddings</p>
-                <p className="text-2xl text-foreground">0</p>
+                <p className="text-xs text-muted-foreground mb-1">Total Messages</p>
+                <p className="text-2xl text-foreground">
+                  {loading ? <Loader2 className="h-5 w-5 animate-spin inline" /> : messageCount}
+                </p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground mb-1">Storage Used</p>
-                <p className="text-2xl text-foreground">0 MB</p>
+                <p className="text-xs text-muted-foreground mb-1">Total Tokens</p>
+                <p className="text-2xl text-foreground">
+                  {loading ? (
+                    <Loader2 className="h-5 w-5 animate-spin inline" />
+                  ) : (
+                    totalTokens.toLocaleString()
+                  )}
+                </p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground mb-1">Avg Query Time</p>
-                <p className="text-2xl text-foreground">--</p>
+                <p className="text-xs text-muted-foreground mb-1">Context Usage</p>
+                <p className="text-2xl text-foreground">
+                  {loading ? (
+                    <Loader2 className="h-5 w-5 animate-spin inline" />
+                  ) : (
+                    `${contextPct.toFixed(1)}%`
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Last Updated</p>
-                <p className="text-2xl text-foreground">Never</p>
+                <p className="text-2xl text-foreground">{lastUpdated}</p>
               </div>
             </div>
           </div>

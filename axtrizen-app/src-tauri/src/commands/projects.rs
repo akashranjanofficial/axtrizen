@@ -85,3 +85,36 @@ pub async fn delete_project(id: String) -> Result<(), String> {
     
     Ok(())
 }
+
+#[tauri::command]
+pub async fn update_project(
+    id: String,
+    name: String,
+    description: Option<String>,
+    team_id: Option<String>,
+    status: String,
+    phase: String,
+    workspace_path: Option<String>,
+) -> Result<Project, String> {
+    let conn = db::init_db().map_err(|e| e.to_string())?;
+    
+    db::update_project(
+        &conn,
+        &id,
+        &name,
+        description.as_deref(),
+        team_id.as_deref(),
+        &status,
+        &phase,
+        workspace_path.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Fetch and return the updated project
+    let projects = db::get_all_projects(&conn).map_err(|e| e.to_string())?;
+    projects
+        .into_iter()
+        .find(|p| p.id == id)
+        .map(Project::from)
+        .ok_or_else(|| "Project not found after update".to_string())
+}

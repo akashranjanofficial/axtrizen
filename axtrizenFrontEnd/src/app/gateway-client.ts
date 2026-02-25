@@ -25,6 +25,8 @@ export type ChatMessage = {
   content: string;
   timestamp: number;
   status?: "sending" | "sent" | "error";
+  senderName?: string; // e.g. "Backend", "Manager", "FrontEndDev1"
+  senderLabel?: string; // e.g. "system", "assistant", "manager"
 };
 
 export type AgentInfo = {
@@ -58,6 +60,9 @@ export class OpenClawGatewayClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = 1000;
   private closed = false;
+  private connectNonce: string | null = null;
+  private connectSent = false;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Public state
   status: ConnectionStatus = "disconnected";
@@ -136,7 +141,16 @@ export class OpenClawGatewayClient {
     }
 
     this.ws.onopen = () => {
-      this.sendConnectFrame();
+      // Don't send connect immediately — wait for connect.challenge from Gateway.
+      // Queue a fallback connect after 750ms in case challenge isn't received.
+      this.connectNonce = null;
+      this.connectSent = false;
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer);
+      }
+      this.connectTimer = setTimeout(() => {
+        this.sendConnectFrame();
+      }, 750);
     };
 
     this.ws.onmessage = (evt) => {
@@ -162,6 +176,10 @@ export class OpenClawGatewayClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
     if (this.ws) {
       this.ws.close(1000, "client disconnect");
       this.ws = null;
@@ -184,7 +202,16 @@ export class OpenClawGatewayClient {
   // ── Protocol ─────────────────────────────────────────────────────────
 
   private sendConnectFrame() {
-    const params = {
+    if (this.connectSent) {
+      return;
+    }
+    this.connectSent = true;
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+
+    const params: Record<string, unknown> = {
       minProtocol: 3,
       maxProtocol: 3,
       client: {
@@ -200,6 +227,11 @@ export class OpenClawGatewayClient {
       role: "operator",
       scopes: ["operator.admin", "operator.write"],
     };
+
+    // Include nonce from connect.challenge if available
+    if (this.connectNonce) {
+      params.nonce = this.connectNonce;
+    }
 
     this.request<{ protocol?: number }>("connect", params)
       .then(() => {
@@ -219,9 +251,13 @@ export class OpenClawGatewayClient {
 
       // Event frame: { type: "evt", event: "...", payload: ..., seq: ... }
       if (parsed.type === "evt") {
-        // Handle connect challenge (nonce)
+        // Handle connect.challenge: Gateway requires nonce-signed handshake
         if (parsed.event === "connect.challenge") {
-          // Simplified: we don't do device auth in the browser
+          const payload = parsed.payload as { nonce?: string } | undefined;
+          if (payload?.nonce) {
+            this.connectNonce = payload.nonce;
+            this.sendConnectFrame();
+          }
           return;
         }
         this.onEvent?.(parsed as GatewayEvent);
