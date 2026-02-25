@@ -949,6 +949,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
           teamId: selectedTeam?.id,
           mentionedAgentIds,
         })) {
+          console.log(`[chatwindow:orch] event=${event.type}`, event);
           switch (event.type) {
             case "agent_thinking": {
               const msgId = `orch-${Date.now()}-${msgCounter++}`;

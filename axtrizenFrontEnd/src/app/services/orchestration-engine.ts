@@ -68,12 +68,17 @@ const COLLABORATIVE_PATTERNS =
   /\b(discuss|team|everyone|all of you|brainstorm|collaborate|together|as a team|with the team|with team|round.?table|group discussion|let'?s talk)\b/i;
 
 export function classifyIntent(message: string, mentionedAgentIds: string[]): Intent {
-  // Collaborative language overrides single-@mention routing.
-  // e.g. "@Manager discuss with team how we can develop X" → full team discussion
+  // Collaborative language overrides ALL other patterns.
+  // "discuss with team how we can develop X" → RoundRobin, NOT MapReduce
   const isCollaborative = COLLABORATIVE_PATTERNS.test(message);
 
   // Single @mention WITHOUT collaborative intent → direct route
   if (mentionedAgentIds.length === 1 && !isCollaborative) return "route";
+
+  // Collaborative language → always RoundRobin discussion
+  // This takes priority over build/decide/pipeline because the user
+  // explicitly asked for a discussion, not parallel execution.
+  if (isCollaborative) return "question";
 
   // Decision/comparison language → Debate
   if (DECIDE_PATTERNS.test(message)) return "decide";
@@ -163,6 +168,10 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
   const responses: Array<{ name: string; text: string; agentId: string }> = [];
   let transcript = message;
 
+  console.log(
+    `[orchestration:roundrobin] ${orderedInfos.length} agents in order: ${orderedInfos.map((a) => agentName(a)).join(", ")}`,
+  );
+
   // Each agent speaks in order
   for (let i = 0; i < orderedInfos.length; i++) {
     const agent = orderedInfos[i];
@@ -182,7 +191,9 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
       }
       prompt = withMemory(agent.id, prompt);
 
+      console.log(`[orchestration:roundrobin] Calling agent ${name} (${agent.id})...`);
       const response = await sendWithRetry(gateway, prompt, agent.id, sessionKey(agent.id, teamId));
+      console.log(`[orchestration:roundrobin] Agent ${name} responded OK`);
       let text = processMemory(agent.id, extractText(response));
 
       responses.push({ name, text, agentId: agent.id });
@@ -191,6 +202,7 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
       yield { type: "agent_response", agentId: agent.id, agentName: name, text };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+      console.error(`[orchestration:roundrobin] Agent ${name} FAILED:`, error);
       yield { type: "agent_error", agentId: agent.id, agentName: name, error };
     }
   }
@@ -258,6 +270,7 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
   }
 
   // Step 2: Workers execute in PARALLEL
+  console.log(`[orchestration:mapreduce] Launching ${workers.length} workers in parallel`);
   for (const w of workers) {
     yield { type: "agent_thinking", agentId: w.id, agentName: agentName(w), position: "parallel" };
   }
@@ -278,6 +291,7 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
     }),
   );
 
+  console.log(`[orchestration:mapreduce] All workers settled`);
   const successResults: Array<{ name: string; text: string }> = [];
   for (const result of workerResults) {
     if (result.status === "fulfilled") {
@@ -294,6 +308,7 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
         agentName: agentName(worker),
         error: String(result.reason),
       };
+      console.error(`[orchestration:mapreduce] Worker ${agentName(worker)} FAILED:`, result.reason);
     }
   }
 
@@ -645,6 +660,9 @@ const STRATEGIES: Record<
  */
 export async function* orchestrate(ctx: OrchestrationContext): AsyncGenerator<OrchestrationEvent> {
   const intent = classifyIntent(ctx.message, ctx.mentionedAgentIds);
+  console.log(
+    `[orchestration] intent="${intent}" agents=${ctx.agents.length} mentioned=${ctx.mentionedAgentIds.length} message="${ctx.message.slice(0, 60)}..."`,
+  );
   const strategy = STRATEGIES[intent];
   yield* strategy(ctx);
 }
