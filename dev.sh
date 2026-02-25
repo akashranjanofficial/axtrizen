@@ -63,7 +63,12 @@ if [ ! -d "$SCRIPT_DIR/axtrizenFrontEnd/node_modules" ]; then
 fi
 
 # ── 6. Start OpenClaw Gateway ──────────────────────────────────────
-export OPENCLAW_GATEWAY_TOKEN="dev-token"
+# Read the real token from ~/.openclaw/openclaw.json (same one the client reads)
+OC_CONFIG="$HOME/.openclaw/openclaw.json"
+if [ -f "$OC_CONFIG" ]; then
+  REAL_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$OC_CONFIG','utf8'));console.log(c.gateway?.auth?.token||'')}catch{}" 2>/dev/null)
+fi
+export OPENCLAW_GATEWAY_TOKEN="${REAL_TOKEN:-dev-token}"
 
 echo "🌐 Starting OpenClaw Gateway..."
 node "$OC_DIR/openclaw.mjs" gateway --allow-unconfigured --dev --token "$OPENCLAW_GATEWAY_TOKEN" &

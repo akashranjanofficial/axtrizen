@@ -124,12 +124,6 @@ export class OpenClawGatewayClient {
       }
     }
 
-    // Dev fallback: use the default dev token if no token found anywhere.
-    // This matches the --token flag used in dev.sh.
-    if (!this.token) {
-      this.token = "dev-token";
-    }
-
     this.doConnect();
   }
 
