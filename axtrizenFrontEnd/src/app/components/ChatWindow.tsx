@@ -323,6 +323,15 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   const clientRef = useRef(getGatewayClient());
   const messageStoreRef = useRef<Map<string, ChatMessage[]>>(new Map());
 
+  // Helper: save current messages to in-memory store before switching chats
+  const saveCurrentMessages = useCallback(() => {
+    if (selectedAgent && !selectedTeam) {
+      messageStoreRef.current.set(`dm:${selectedAgent.id}`, messages);
+    } else if (selectedTeam) {
+      messageStoreRef.current.set(`team:${selectedTeam.id}`, messages);
+    }
+  }, [selectedAgent, selectedTeam, messages]);
+
   // Refs for websocket event handlers to access current state
   const selectedAgentRef = useRef(selectedAgent);
   const selectedTeamRef = useRef(selectedTeam);
@@ -480,6 +489,8 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         setSelectedAgent(null);
         setSelectedTeam(team);
         setMessages(messageStoreRef.current.get(`team:${team.id}`) || []);
+        // Also try to load from gateway
+        loadGroupChatHistory(team.id);
         // Load team members for the panel
         getTeamMembers(team.id)
           .then(setTeamMembers)
@@ -699,14 +710,14 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             return true;
           });
         setMessages(parsed);
-        messageStoreRef.current.set(agentId, parsed);
+        messageStoreRef.current.set(`dm:${agentId}`, parsed);
       } else {
         setMessages([]);
       }
     } catch (err) {
       console.warn("Failed to load chat history:", err);
       // Fall back to in-memory store
-      setMessages(messageStoreRef.current.get(agentId) || []);
+      setMessages(messageStoreRef.current.get(`dm:${agentId}`) || []);
     }
   }, []);
 
@@ -718,7 +729,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         return;
       }
 
-      const sessionKey = `team:${teamId}:group`;
+      const sessionKey = `team-chat:${teamId}`;
       const result = await gw.getChatHistory(sessionKey);
 
       if (result.messages && result.messages.length > 0) {
@@ -1572,7 +1583,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         console.warn("Failed to reset session on gateway:", err);
       }
       // Clear local messages
-      messageStoreRef.current.set(selectedAgent.id, []);
+      messageStoreRef.current.set(`dm:${selectedAgent.id}`, []);
     } else if (selectedTeam) {
       const sessionKey = `team:${selectedTeam.id}:main`;
       try {
@@ -1580,7 +1591,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       } catch (err) {
         console.warn("Failed to reset team session on gateway:", err);
       }
-      messageStoreRef.current.set(selectedTeam.id, []);
+      messageStoreRef.current.set(`team:${selectedTeam.id}`, []);
     }
 
     // Clear displayed messages
@@ -1784,12 +1795,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                     <button
                       key={chatKey}
                       onClick={() => {
-                        if (selectedAgent) {
-                          messageStoreRef.current.set(selectedAgent.id, messages);
-                        }
-                        if (selectedTeam) {
-                          messageStoreRef.current.set(`team:${selectedTeam.id}`, messages);
-                        }
+                        saveCurrentMessages();
                         setSelectedAgent(null);
                         setSelectedTeam(team);
                         // Load group chat history from Gateway (includes orchestration messages)
@@ -1896,12 +1902,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                     <button
                       key={chatKey}
                       onClick={() => {
-                        if (selectedAgent) {
-                          messageStoreRef.current.set(selectedAgent.id, messages);
-                        }
-                        if (selectedTeam) {
-                          messageStoreRef.current.set(`team:${selectedTeam.id}`, messages);
-                        }
+                        saveCurrentMessages();
                         setSelectedTeam(null);
                         setSelectedAgent(agent);
                         // Clear unread
