@@ -884,6 +884,24 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
 
         targetAgents = Array.from(foundAgents.values());
         isGroupChatTag = true;
+
+        // ── Collaborative Intent Expansion ──────────────────────────
+        // If the user @-mentioned only 1 agent but used collaborative
+        // language ("discuss with team", "everyone", "brainstorm"),
+        // expand targetAgents to ALL agents so the orchestration engine
+        // triggers a full team discussion instead of single-agent mode.
+        const COLLAB_RE =
+          /\b(discuss|team|everyone|all of you|brainstorm|collaborate|together|as a team|with the team|with team|round.?table|group discussion|let'?s talk)\b/i;
+        if (targetAgents.length === 1 && COLLAB_RE.test(body)) {
+          // Keep the originally @-mentioned agent, then add the rest
+          const mentionedId = targetAgents[0].id;
+          targetAgents = agents.filter(Boolean);
+          // Ensure the @-mentioned agent is first (for smart ordering)
+          targetAgents.sort((a, b) => (a.id === mentionedId ? -1 : b.id === mentionedId ? 1 : 0));
+          console.log(
+            `[chatwindow] Collaborative intent detected — expanded targetAgents to ${targetAgents.length} agents`,
+          );
+        }
       } else if (selectedAgent) {
         targetAgents = [selectedAgent];
       }
