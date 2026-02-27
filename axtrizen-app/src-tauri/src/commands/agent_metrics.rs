@@ -55,8 +55,8 @@ pub async fn get_agent_usage(
         .map_err(|e| e.to_string())?;
 
     // Check if cached data is fresh enough (within 30 seconds)
-    let is_stale = cached.as_ref().map_or(true, |snap| {
-        snap.snapshot_at.as_ref().map_or(true, |ts| {
+    let is_stale = cached.as_ref().is_none_or(|snap| {
+        snap.snapshot_at.as_ref().is_none_or(|ts| {
             // Simple staleness check: if snapshot_at is older than 30s
             chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
                 .map_or(true, |parsed| {

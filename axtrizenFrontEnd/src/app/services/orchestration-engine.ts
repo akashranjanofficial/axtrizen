@@ -12,7 +12,7 @@
  * - Parallel execution: MapReduce runs agents concurrently
  */
 
-import type { GatewayAdapter, AgentResponse } from "./gateway-adapter";
+import type { GatewayAdapter, AgentResponse, StreamDelta } from "./gateway-adapter";
 import { buildSessionKey } from "./gateway-adapter";
 import {
   getSmartSpeakerOrder,
@@ -38,6 +38,8 @@ export interface OrchestrationContext {
   gateway: GatewayAdapter;
   teamId?: string;
   mentionedAgentIds: string[];
+  /** Project workspace path — agents write files here */
+  workspacePath?: string;
 }
 
 /** Events yielded by the engine — the UI renders these. */
@@ -55,7 +57,75 @@ export type OrchestrationEvent =
   | { type: "round_start"; round: number; maxRounds: number }
   | { type: "pivot_gate_thinking"; agentName: string; round: number }
   | { type: "pivot_gate_verdict"; agentName: string; verdict: PivotVerdict; text: string }
-  | { type: "complete"; strategy: string };
+  | { type: "text_delta"; agentId: string; agentName: string; text: string }
+  | { type: "tool_start"; agentId: string; agentName: string; tool: string; input: string }
+  | {
+      type: "tool_result";
+      agentId: string;
+      agentName: string;
+      tool: string;
+      output: string;
+      error?: string;
+    }
+  | { type: "product_ready"; workspacePath: string; summary: string }
+  | { type: "complete"; strategy: string }
+  | {
+      type: "task_update";
+      taskId: string;
+      agentId: string;
+      agentName: string;
+      status: string;
+      filesCreated?: string[];
+      notes?: string;
+    };
+
+// ── Event Priority System (Mission Control Foundation) ──────────────
+
+export type EventPriority = "critical" | "review" | "info" | "debug";
+
+/** Classify an orchestration event by priority for the Mission Control UI.
+ *  - critical: needs human input NOW (errors, blocked agents)
+ *  - review: work ready for human approval
+ *  - info: milestones, summaries, key decisions
+ *  - debug: routine thinking/progress (collapsed by default)
+ */
+export function classifyEventPriority(event: OrchestrationEvent): EventPriority {
+  switch (event.type) {
+    // CRITICAL — needs human attention immediately
+    case "agent_error":
+      return "critical";
+
+    // REVIEW — work ready for approval
+    case "product_ready":
+      return "review";
+    case "review_result":
+      return event.approved ? "info" : "review";
+
+    // INFO — milestones and key outputs
+    case "summary":
+    case "agent_response":
+    case "delegation_result":
+    case "revision":
+    case "pivot_gate_verdict":
+    case "complete":
+      return "info";
+
+    // DEBUG — routine progress (collapse in large teams)
+    case "agent_thinking":
+    case "summary_thinking":
+    case "review_thinking":
+    case "delegation_start":
+    case "round_start":
+    case "pivot_gate_thinking":
+    case "text_delta":
+    case "tool_start":
+    case "tool_result":
+      return "debug";
+
+    default:
+      return "debug";
+  }
+}
 
 /** Pivot Gate verdict types — inspired by War Room Wave Protocol */
 export type PivotVerdictType = "CONVERGED" | "CONTINUE" | "ASSIGN";
@@ -66,7 +136,7 @@ export interface PivotVerdict {
   assignments?: Array<{ agentName: string; task: string }>;
 }
 
-export type Intent = "question" | "build" | "decide" | "pipeline" | "route";
+export type Intent = "question" | "build" | "decide" | "pipeline" | "route" | "mission";
 
 // ── Intent Classifier ──────────────────────────────────────────────────
 
@@ -147,6 +217,35 @@ async function sendWithRetry(
   }
 }
 
+/**
+ * Send a message with streaming — collects tool events into a buffer
+ * and returns both the final response AND any tool events that occurred.
+ */
+async function sendWithRetryStreaming(
+  gw: GatewayAdapter,
+  message: string,
+  agentId: string,
+  key: string,
+): Promise<{ response: AgentResponse; toolEvents: StreamDelta[] }> {
+  const toolEvents: StreamDelta[] = [];
+  try {
+    const response = await gw.sendMessageStreaming(message, agentId, key, (delta) => {
+      if (delta.type === "tool_start" || delta.type === "tool_result") {
+        toolEvents.push(delta);
+      }
+    });
+    return { response, toolEvents };
+  } catch {
+    await new Promise((r) => setTimeout(r, 2000));
+    const response = await gw.sendMessageStreaming(message, agentId, key, (delta) => {
+      if (delta.type === "tool_start" || delta.type === "tool_result") {
+        toolEvents.push(delta);
+      }
+    });
+    return { response, toolEvents };
+  }
+}
+
 /** Inject memory context into a prompt */
 function withMemory(agentId: string, prompt: string): string {
   const memory = loadAgentMemory(agentId);
@@ -158,6 +257,88 @@ function withMemory(agentId: string, prompt: string): string {
 function processMemory(agentId: string, text: string): string {
   const result = extractMemoryUpdates(agentId, text);
   return result.updated ? result.cleanText : text;
+}
+
+// ── Shared Workspace Instructions Builder ───────────────────────────────
+
+/** Tool names that indicate file creation/modification */
+const FILE_TOOL_NAMES = [
+  "write_file",
+  "create_file",
+  "edit_file",
+  "str_replace_editor",
+  "file_editor",
+  "bash",
+  "mv",
+  "cp",
+  "mkdir",
+  "touch",
+];
+
+/** Build workspace instructions for any worker agent */
+function buildWorkspaceInstructions(workspacePath?: string): string {
+  if (!workspacePath) return "";
+  return [
+    ``,
+    `## Project Workspace`,
+    `All code and files for this project live in:`,
+    `\`${workspacePath}\``,
+    ``,
+    `### ⚡ YOU HAVE FULL SUPERPOWER ACCESS — USE ALL TOOLS:`,
+    `You have UNRESTRICTED access to every tool available. Use them aggressively to deliver the best result:`,
+    ``,
+    `**🛠️ File & Code Tools:**`,
+    `- \`bash\` — Run ANY shell command (npm, pip, git, curl, make, docker, etc.)`,
+    `- \`write_file\` / \`create_file\` / \`edit_file\` — Create and modify files`,
+    `- \`read_file\` / \`list_dir\` — Explore the filesystem`,
+    `- \`str_replace_editor\` — Surgical code edits`,
+    ``,
+    `**📦 Package Management:**`,
+    `- Run \`npm install\`, \`pip install\`, \`cargo add\`, \`go get\`, etc. freely`,
+    `- Initialize projects with \`npm init\`, \`cargo init\`, \`python -m venv\`, etc.`,
+    `- Install ANY dependency the project needs`,
+    ``,
+    `**🌐 Web & Research:**`,
+    `- \`web_search\` — Search the web for docs, APIs, packages`,
+    `- \`browser\` — Open and interact with web pages`,
+    `- \`curl\` / \`wget\` — Download files, hit APIs`,
+    ``,
+    `**🔧 System Tools:**`,
+    `- \`git\` — Version control, clone repos, create branches`,
+    `- \`screen.capture\` — Take screenshots for verification`,
+    `- \`camera.snap\` — Access camera if needed`,
+    `- Run development servers, build tools, linters, formatters`,
+    ``,
+    `### CRITICAL INSTRUCTIONS:`,
+    `1. **CREATE REAL FILES** — Use your tools to write actual code, not descriptions`,
+    `2. **INSTALL DEPENDENCIES** — Run \`npm install\`, \`pip install -r requirements.txt\`, etc. before testing`,
+    `3. **TEST YOUR WORK** — Run the code, verify it works, fix errors`,
+    `4. **ITERATE** — If something fails, debug and fix it. Don't give up.`,
+    `5. **Be thorough** — Set up the complete project structure (configs, tests, docs)`,
+    ``,
+    `### 📋 FILE VERIFICATION:`,
+    `When you finish, list ALL files you created/modified in this format:`,
+    `\`\`\``,
+    `FILES_CREATED:`,
+    `- ${workspacePath}/src/App.tsx (new)`,
+    `- ${workspacePath}/package.json (modified)`,
+    `\`\`\``,
+    ``,
+    `> ⚠️ Do NOT just describe what you would do.`,
+    `> You MUST create the actual files using your tools.`,
+    `> The human expects REAL files, not descriptions.`,
+  ].join("\n");
+}
+
+/** Check if a review response indicates approval (avoids 'NOT APPROVED' false positives) */
+function isApproved(reviewText: string): boolean {
+  const t = reviewText.trim().toUpperCase();
+  // Must start with APPROVED (optionally after whitespace/emoji)
+  // and NOT be preceded by NOT/DIS/UN
+  if (/^\s*(✅\s*)?APPROVED\b/.test(t)) return true;
+  if (/NOT\s+APPROVED|DISAPPROVED|UNAPPROVED|REVISION\s+NEEDED/i.test(t)) return false;
+  // Fallback: check if APPROVED appears prominently
+  return /^APPROVED\b/m.test(t);
 }
 
 // ── System Prompt Builders (inspired by War Room + cc-godmode) ───────────
@@ -446,7 +627,7 @@ async function* roundRobin(ctx: OrchestrationContext): AsyncGenerator<Orchestrat
   yield { type: "complete", strategy: "round-robin" };
 }
 
-// ── Execute ASSIGN Tasks with Manager Review Loop ───────────────────────
+// ── Execute ASSIGN Tasks with Builder Protocol + Streaming ──────────────
 
 async function* executeAssignments(
   ctx: OrchestrationContext,
@@ -454,7 +635,7 @@ async function* executeAssignments(
   assignments: Array<{ agentName: string; task: string }>,
   transcript: string,
 ): AsyncGenerator<OrchestrationEvent> {
-  const { gateway, teamId } = ctx;
+  const { gateway, teamId, workspacePath } = ctx;
   const MAX_REVISIONS = 2;
 
   // Identify the manager for the review loop
@@ -462,7 +643,12 @@ async function* executeAssignments(
     orderedAgents.find((a) => a.role?.toLowerCase().includes("manager")) || orderedAgents[0];
   const managerName = agentName(manager);
 
-  const completedReports: Array<{ worker: string; task: string; output: string }> = [];
+  const completedReports: Array<{
+    worker: string;
+    task: string;
+    output: string;
+    filesCreated: string[];
+  }> = [];
 
   for (const assignment of assignments) {
     // Find the agent by name (case-insensitive)
@@ -478,30 +664,64 @@ async function* executeAssignments(
     yield { type: "delegation_start", agentName: name, task: assignment.task };
 
     try {
-      // ── Step 1: Worker executes task ──
+      // ── Step 1: Worker executes task with Builder Protocol ──
+      const workspaceInstructions = buildWorkspaceInstructions(workspacePath);
+
       const taskPrompt = withMemory(
         worker.id,
         [
           `## Task Assignment from Manager`,
           ``,
           `**Your task:** ${assignment.task}`,
+          workspaceInstructions,
           ``,
           `**Context from team discussion:**`,
           transcript,
           ``,
           `Complete this task thoroughly. When done, provide a clear **report** of what you accomplished,`,
           `including specifics, decisions made, and any deliverables.`,
+          `List all files you created or modified.`,
         ].join("\n"),
       );
 
-      const taskResp = await sendWithRetry(
+      // Use streaming to capture tool events
+      const { response: taskResp, toolEvents } = await sendWithRetryStreaming(
         gateway,
         taskPrompt,
         worker.id,
         sessionKey(worker.id, teamId),
       );
+
+      // Yield tool events so the UI can display them
+      for (const evt of toolEvents) {
+        if (evt.type === "tool_start") {
+          yield {
+            type: "tool_start",
+            agentId: worker.id,
+            agentName: name,
+            tool: evt.toolName,
+            input: evt.toolInput,
+          };
+        } else if (evt.type === "tool_result") {
+          yield {
+            type: "tool_result",
+            agentId: worker.id,
+            agentName: name,
+            tool: evt.toolName,
+            output: evt.output,
+            error: evt.error,
+          };
+        }
+      }
+
       let currentOutput = processMemory(worker.id, extractText(taskResp));
       yield { type: "delegation_result", agentName: name, text: currentOutput };
+
+      // Track files created from tool events
+      const filesCreated = toolEvents
+        .filter((e): e is StreamDelta & { type: "tool_start" } => e.type === "tool_start")
+        .filter((e) => FILE_TOOL_NAMES.includes(e.toolName))
+        .map((e) => e.toolInput.slice(0, 200));
 
       // ── Step 2: Manager reviews the worker's report ──
       for (let rev = 0; rev < MAX_REVISIONS; rev++) {
@@ -509,6 +729,11 @@ async function* executeAssignments(
         console.log(
           `[orchestration:assign] Manager ${managerName} reviewing ${name}'s work (attempt ${rev + 1})...`,
         );
+
+        const filesSummary =
+          filesCreated.length > 0
+            ? `\n\n**Files created/modified (${filesCreated.length} tool calls detected):**\n${filesCreated.map((f) => `- ${f}`).join("\n")}`
+            : "\n\n**⚠️ No file-creation tool calls were detected. The worker may have only provided text.**";
 
         const reviewPrompt = withMemory(
           manager.id,
@@ -519,10 +744,14 @@ async function* executeAssignments(
             ``,
             `**@${name}'s report:**`,
             currentOutput,
+            filesSummary,
             ``,
             `---`,
             ``,
             `Review this work carefully. Does it meet the requirements?`,
+            workspacePath
+              ? `If the worker only described what they would do but did NOT create actual files, request REVISION and tell them to USE THEIR TOOLS to create the files.`
+              : "",
             ``,
             `If **APPROVED**: Start your response with "APPROVED" and provide brief feedback.`,
             `If **REVISION NEEDED**: Start with "REVISION NEEDED" and explain exactly what needs to change.`,
@@ -536,7 +765,7 @@ async function* executeAssignments(
           sessionKey(manager.id, teamId),
         );
         const reviewText = processMemory(manager.id, extractText(reviewResp));
-        const approved = reviewText.toUpperCase().includes("APPROVED");
+        const approved = isApproved(reviewText);
 
         yield {
           type: "review_result",
@@ -547,7 +776,12 @@ async function* executeAssignments(
 
         if (approved) {
           console.log(`[orchestration:assign] Manager APPROVED ${name}'s work`);
-          completedReports.push({ worker: name, task: assignment.task, output: currentOutput });
+          completedReports.push({
+            worker: name,
+            task: assignment.task,
+            output: currentOutput,
+            filesCreated,
+          });
           break;
         }
 
@@ -564,24 +798,63 @@ async function* executeAssignments(
             ``,
             `**Your previous output:**`,
             currentOutput,
+            workspacePath
+              ? `\n**REMINDER:** You MUST use your tools (bash, write_file) to create/modify actual files in \`${workspacePath}\`. Do not just describe changes.`
+              : "",
             ``,
             `Please revise based on the feedback. Provide the complete updated deliverable.`,
           ].join("\n"),
         );
 
-        const reviseResp = await sendWithRetry(
+        // Stream revision too
+        const { response: reviseResp, toolEvents: revToolEvents } = await sendWithRetryStreaming(
           gateway,
           revisePrompt,
           worker.id,
           sessionKey(worker.id, teamId),
         );
+
+        // Yield revision tool events
+        for (const evt of revToolEvents) {
+          if (evt.type === "tool_start") {
+            yield {
+              type: "tool_start",
+              agentId: worker.id,
+              agentName: name,
+              tool: evt.toolName,
+              input: evt.toolInput,
+            };
+          } else if (evt.type === "tool_result") {
+            yield {
+              type: "tool_result",
+              agentId: worker.id,
+              agentName: name,
+              tool: evt.toolName,
+              output: evt.output,
+              error: evt.error,
+            };
+          }
+        }
+
         currentOutput = processMemory(worker.id, extractText(reviseResp));
         yield { type: "revision", agentName: name, round: rev + 2, text: currentOutput };
+
+        // Track additional files from revision
+        const revFiles = revToolEvents
+          .filter((e): e is StreamDelta & { type: "tool_start" } => e.type === "tool_start")
+          .filter((e) => FILE_TOOL_NAMES.includes(e.toolName))
+          .map((e) => e.toolInput.slice(0, 200));
+        filesCreated.push(...revFiles);
 
         // If this was the last revision attempt, auto-accept
         if (rev === MAX_REVISIONS - 1) {
           console.log(`[orchestration:assign] Max revisions reached for ${name}, auto-accepting`);
-          completedReports.push({ worker: name, task: assignment.task, output: currentOutput });
+          completedReports.push({
+            worker: name,
+            task: assignment.task,
+            output: currentOutput,
+            filesCreated,
+          });
         }
       }
     } catch (err) {
@@ -601,7 +874,10 @@ async function* executeAssignments(
 
     try {
       const allReports = completedReports
-        .map((r) => `### @${r.worker} — ${r.task}\n${r.output}`)
+        .map((r) => {
+          const fileList = r.filesCreated.length > 0 ? `\nFiles: ${r.filesCreated.join(", ")}` : "";
+          return `### @${r.worker} — ${r.task}\n${r.output}${fileList}`;
+        })
         .join("\n\n---\n\n");
 
       const finalPrompt = withMemory(
@@ -618,8 +894,9 @@ async function* executeAssignments(
           `Produce a **final consolidated report** for the human:`,
           `1. Summarize what each team member delivered`,
           `2. Highlight the overall outcome and how the pieces fit together`,
-          `3. Note any remaining follow-ups or next steps`,
-          `4. Present this as the **final product** ready for the human`,
+          `3. List ALL files created with their paths`,
+          `4. Note any remaining follow-ups or next steps`,
+          `5. Present this as the **final product** ready for the human`,
         ].join("\n"),
       );
 
@@ -631,6 +908,15 @@ async function* executeAssignments(
       );
       const finalText = processMemory(manager.id, extractText(finalResp));
       yield { type: "summary", agentName: managerName, text: finalText };
+
+      // Emit product_ready if workspace exists
+      if (workspacePath) {
+        yield {
+          type: "product_ready",
+          workspacePath,
+          summary: finalText,
+        };
+      }
     } catch (err) {
       console.error(`[orchestration:assign] Manager final report FAILED:`, err);
       // Still show individual reports if summary fails
@@ -643,11 +929,13 @@ async function* executeAssignments(
 // ──── 2. MapReduce ──────────────────────────────────────────────────────
 
 async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<OrchestrationEvent> {
-  const { message, agents, gateway, teamId } = ctx;
+  const { message, agents, gateway, teamId, workspacePath } = ctx;
+  const MAX_REVISIONS = 2;
 
   // Manager = first agent (or highest-ranked by role)
   const manager = agents.find((a) => a.role?.toLowerCase().includes("manager")) || agents[0];
   const workers = agents.filter((a) => a.id !== manager.id);
+  const managerName_ = agentName(manager);
 
   if (workers.length === 0) {
     // Fall back to single agent
@@ -659,13 +947,17 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
   yield {
     type: "agent_thinking",
     agentId: manager.id,
-    agentName: agentName(manager),
+    agentName: managerName_,
     position: "planning",
   };
 
+  const workspaceNote = workspacePath
+    ? `\n\n**Important:** The project workspace is at \`${workspacePath}\`. Each agent MUST use their tools to create REAL files there. They should install dependencies and test their work.`
+    : "";
+
   const decomposePrompt = withMemory(
     manager.id,
-    `Break down this task into ${workers.length} parallel subtasks, one for each team member:\n\n"${message}"\n\nTeam members: ${workers.map((w) => `@${agentName(w)}`).join(", ")}\n\nFor each, write:\n@AgentName: [task description]\n\nBe specific. Each subtask should be independently completable.`,
+    `Break down this task into ${workers.length} parallel subtasks, one for each team member:\n\n"${message}"${workspaceNote}\n\nTeam members: ${workers.map((w) => `@${agentName(w)} (${w.role || "worker"})`).join(", ")}\n\nFor each, write:\n@AgentName: [specific task description]\n\nBe very specific. Each subtask should be independently completable. Include which files to create and what technologies to use.`,
   );
 
   let decomposition: string;
@@ -680,49 +972,101 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
     yield {
       type: "agent_response",
       agentId: manager.id,
-      agentName: agentName(manager),
+      agentName: managerName_,
       text: decomposition,
     };
   } catch (err) {
     yield {
       type: "agent_error",
       agentId: manager.id,
-      agentName: agentName(manager),
+      agentName: managerName_,
       error: String(err),
     };
     yield { type: "complete", strategy: "map-reduce" };
     return;
   }
 
-  // Step 2: Workers execute in PARALLEL
+  // Step 2: Workers execute in PARALLEL with workspace tools + streaming
   console.log(`[orchestration:mapreduce] Launching ${workers.length} workers in parallel`);
   for (const w of workers) {
     yield { type: "agent_thinking", agentId: w.id, agentName: agentName(w), position: "parallel" };
   }
 
+  const workspaceInstructions = buildWorkspaceInstructions(workspacePath);
+
   const workerResults = await Promise.allSettled(
     workers.map(async (worker) => {
       const workerPrompt = withMemory(
         worker.id,
-        `Your manager decomposed this task:\n\n${decomposition}\n\nOriginal request: "${message}"\n\nComplete YOUR assigned subtask. Focus only on your part.`,
+        [
+          `## Task Assignment from Manager`,
+          ``,
+          `Your manager decomposed this task:`,
+          ``,
+          decomposition,
+          ``,
+          `**Original request:** "${message}"`,
+          ``,
+          `Complete YOUR assigned subtask. Focus only on your part.`,
+          workspaceInstructions,
+        ].join("\n"),
       );
-      const resp = await sendWithRetry(
+      const { response: resp, toolEvents } = await sendWithRetryStreaming(
         gateway,
         workerPrompt,
         worker.id,
         sessionKey(worker.id, teamId),
       );
-      return { worker, text: processMemory(worker.id, extractText(resp)) };
+      return {
+        worker,
+        text: processMemory(worker.id, extractText(resp)),
+        toolEvents,
+      };
     }),
   );
 
   console.log(`[orchestration:mapreduce] All workers settled`);
-  const successResults: Array<{ name: string; text: string }> = [];
+  const successResults: Array<{
+    name: string;
+    text: string;
+    agentId: string;
+    filesCreated: string[];
+  }> = [];
+
   for (const result of workerResults) {
     if (result.status === "fulfilled") {
-      const { worker, text } = result.value;
-      successResults.push({ name: agentName(worker), text });
-      yield { type: "agent_response", agentId: worker.id, agentName: agentName(worker), text };
+      const { worker, text, toolEvents } = result.value;
+      const name = agentName(worker);
+
+      // Yield tool events so UI can display them
+      for (const evt of toolEvents) {
+        if (evt.type === "tool_start") {
+          yield {
+            type: "tool_start",
+            agentId: worker.id,
+            agentName: name,
+            tool: evt.toolName,
+            input: evt.toolInput,
+          };
+        } else if (evt.type === "tool_result") {
+          yield {
+            type: "tool_result",
+            agentId: worker.id,
+            agentName: name,
+            tool: evt.toolName,
+            output: evt.output,
+            error: evt.error,
+          };
+        }
+      }
+
+      const filesCreated = toolEvents
+        .filter((e): e is StreamDelta & { type: "tool_start" } => e.type === "tool_start")
+        .filter((e) => FILE_TOOL_NAMES.includes(e.toolName))
+        .map((e) => e.toolInput.slice(0, 200));
+
+      successResults.push({ name, text, agentId: worker.id, filesCreated });
+      yield { type: "agent_response", agentId: worker.id, agentName: name, text };
     } else {
       // Find which worker failed
       const idx = workerResults.indexOf(result);
@@ -737,14 +1081,134 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
     }
   }
 
-  // Step 3: Manager merges results
-  if (successResults.length > 0) {
-    yield { type: "summary_thinking", agentName: agentName(manager) };
+  // Step 3: Manager reviews each worker's output (Bug Fix #2 — was missing entirely)
+  if (successResults.length > 0 && workspacePath) {
+    for (const workerResult of successResults) {
+      const filesSummary =
+        workerResult.filesCreated.length > 0
+          ? `\n\n**Files created/modified (${workerResult.filesCreated.length} tool calls):**\n${workerResult.filesCreated.map((f) => `- ${f}`).join("\n")}`
+          : "\n\n**⚠️ No file-creation tool calls detected. Worker may have only provided text.**";
 
-    const allResults = successResults.map((r) => `**@${r.name}**:\n${r.text}`).join("\n\n---\n\n");
+      yield { type: "review_thinking", reviewerName: managerName_, workerName: workerResult.name };
+
+      const reviewPrompt = withMemory(
+        manager.id,
+        [
+          `## Quick Review — @${workerResult.name}'s Work`,
+          ``,
+          `**Report:**`,
+          workerResult.text,
+          filesSummary,
+          ``,
+          `If the worker created real files using tools: respond "APPROVED"`,
+          `If the worker only described what they'd do but didn't create files: respond "REVISION NEEDED — use your tools to create actual files"`,
+        ].join("\n"),
+      );
+
+      try {
+        const reviewResp = await sendWithRetry(
+          gateway,
+          reviewPrompt,
+          manager.id,
+          sessionKey(manager.id, teamId),
+        );
+        const reviewText = processMemory(manager.id, extractText(reviewResp));
+        const approved = isApproved(reviewText);
+
+        yield {
+          type: "review_result",
+          reviewerName: managerName_,
+          approved,
+          text: reviewText,
+        };
+
+        // If not approved and workspace exists, request one revision
+        if (!approved) {
+          const worker = agents.find((a) => agentName(a) === workerResult.name);
+          if (worker) {
+            const revisePrompt = withMemory(
+              worker.id,
+              [
+                `## Revision Request from Manager`,
+                ``,
+                `Your manager reviewed your work and requested changes:`,
+                `"${reviewText}"`,
+                ``,
+                `**REMINDER:** You MUST use your tools to create/modify actual files in \`${workspacePath}\`. Do not just describe changes.`,
+                ``,
+                `Please revise and complete the work.`,
+              ].join("\n"),
+            );
+            try {
+              const { response: revResp, toolEvents: revTools } = await sendWithRetryStreaming(
+                gateway,
+                revisePrompt,
+                worker.id,
+                sessionKey(worker.id, teamId),
+              );
+              for (const evt of revTools) {
+                if (evt.type === "tool_start") {
+                  yield {
+                    type: "tool_start",
+                    agentId: worker.id,
+                    agentName: workerResult.name,
+                    tool: evt.toolName,
+                    input: evt.toolInput,
+                  };
+                } else if (evt.type === "tool_result") {
+                  yield {
+                    type: "tool_result",
+                    agentId: worker.id,
+                    agentName: workerResult.name,
+                    tool: evt.toolName,
+                    output: evt.output,
+                    error: evt.error,
+                  };
+                }
+              }
+              workerResult.text = processMemory(worker.id, extractText(revResp));
+              yield {
+                type: "revision",
+                agentName: workerResult.name,
+                round: 2,
+                text: workerResult.text,
+              };
+            } catch {
+              /* revision failed, continue with original */
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[orchestration:mapreduce] Review of ${workerResult.name} failed:`, err);
+      }
+    }
+  }
+
+  // Step 4: Manager merges results
+  if (successResults.length > 0) {
+    yield { type: "summary_thinking", agentName: managerName_ };
+
+    const allResults = successResults
+      .map((r) => {
+        const fileList = r.filesCreated.length > 0 ? `\nFiles: ${r.filesCreated.join(", ")}` : "";
+        return `**@${r.name}**:\n${r.text}${fileList}`;
+      })
+      .join("\n\n---\n\n");
     const mergePrompt = withMemory(
       manager.id,
-      `Your team worked in parallel on: "${message}"\n\nHere are their results:\n\n${allResults}\n\n---\n\nMerge these into a single, coherent final deliverable. Resolve any conflicts.`,
+      [
+        `Your team worked in parallel on: "${message}"`,
+        ``,
+        `Here are their results:\n\n${allResults}`,
+        ``,
+        `---`,
+        ``,
+        `Merge these into a single, coherent final deliverable.`,
+        `1. Summarize what each team member delivered`,
+        `2. List ALL files created with their paths`,
+        `3. Note any remaining follow-ups`,
+        `4. Present this as the **final product** ready for the human`,
+      ].join("\n"),
     );
 
     try {
@@ -755,12 +1219,21 @@ async function* mapReduce(ctx: OrchestrationContext): AsyncGenerator<Orchestrati
         sessionKey(manager.id, teamId),
       );
       const summary = processMemory(manager.id, extractText(resp));
-      yield { type: "summary", agentName: agentName(manager), text: summary };
+      yield { type: "summary", agentName: managerName_, text: summary };
+
+      // Bug Fix #3 — Emit product_ready when workspace exists
+      if (workspacePath) {
+        yield {
+          type: "product_ready",
+          workspacePath,
+          summary,
+        };
+      }
     } catch (err) {
       yield {
         type: "agent_error",
         agentId: manager.id,
-        agentName: agentName(manager),
+        agentName: managerName_,
         error: String(err),
       };
     }
@@ -982,7 +1455,7 @@ async function* summaryAndDelegation(
     }));
     const delegations = parseDelegations(summaryText, discussionAgents, summaryAgent.id);
 
-    // Execute delegations with review loop
+    // Execute delegations with streaming + workspace + review loop
     for (const delegation of delegations) {
       const worker = orderedAgents.find((a) => a.id === delegation.assignedTo.id);
       if (!worker) continue;
@@ -991,13 +1464,40 @@ async function* summaryAndDelegation(
       yield { type: "delegation_start", agentName: workerName, task: delegation.taskDescription };
 
       try {
-        const workerPrompt = buildWorkerReportPrompt(delegation, transcript);
-        const workerResp = await sendWithRetry(
+        // Use streaming so tool events are captured
+        const workerPromptBase = buildWorkerReportPrompt(delegation, transcript);
+        const workspaceInstructions = buildWorkspaceInstructions(ctx.workspacePath);
+        const workerPrompt = workerPromptBase + workspaceInstructions;
+
+        const { response: workerResp, toolEvents } = await sendWithRetryStreaming(
           gateway,
           workerPrompt,
           worker.id,
           sessionKey(worker.id, teamId),
         );
+
+        // Yield tool events
+        for (const evt of toolEvents) {
+          if (evt.type === "tool_start") {
+            yield {
+              type: "tool_start",
+              agentId: worker.id,
+              agentName: workerName,
+              tool: evt.toolName,
+              input: evt.toolInput,
+            };
+          } else if (evt.type === "tool_result") {
+            yield {
+              type: "tool_result",
+              agentId: worker.id,
+              agentName: workerName,
+              tool: evt.toolName,
+              output: evt.output,
+              error: evt.error,
+            };
+          }
+        }
+
         let currentOutput = processMemory(worker.id, extractText(workerResp));
         yield { type: "delegation_result", agentName: workerName, text: currentOutput };
 
@@ -1024,14 +1524,35 @@ async function* summaryAndDelegation(
 
           if (verdict.approved) break;
 
-          // Revision
-          const revisePrompt = `Your manager reviewed your work and requested changes:\n\n"${reviewText}"\n\nYour previous output:\n${currentOutput}\n\nPlease revise based on the feedback.`;
-          const reviseResp = await sendWithRetry(
+          // Revision with streaming
+          const revisePrompt = `Your manager reviewed your work and requested changes:\n\n"${reviewText}"\n\nYour previous output:\n${currentOutput}${ctx.workspacePath ? `\n\n**REMINDER:** You MUST use your tools to create/modify actual files in \`${ctx.workspacePath}\`. Do not just describe changes.` : ""}\n\nPlease revise based on the feedback.`;
+          const { response: reviseResp, toolEvents: revToolEvents } = await sendWithRetryStreaming(
             gateway,
             revisePrompt,
             worker.id,
             sessionKey(worker.id, teamId),
           );
+          // Yield revision tool events
+          for (const evt of revToolEvents) {
+            if (evt.type === "tool_start") {
+              yield {
+                type: "tool_start",
+                agentId: worker.id,
+                agentName: workerName,
+                tool: evt.toolName,
+                input: evt.toolInput,
+              };
+            } else if (evt.type === "tool_result") {
+              yield {
+                type: "tool_result",
+                agentId: worker.id,
+                agentName: workerName,
+                tool: evt.toolName,
+                output: evt.output,
+                error: evt.error,
+              };
+            }
+          }
           currentOutput = processMemory(worker.id, extractText(reviseResp));
           yield { type: "revision", agentName: workerName, round: rev + 2, text: currentOutput };
         }
@@ -1065,6 +1586,7 @@ const STRATEGIES: Record<
   decide: debate,
   pipeline: pipeline,
   route: autoRoute,
+  mission: mapReduce, // mission uses mapReduce at team level — see orchestrateMission
 };
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -1099,4 +1621,272 @@ export async function* orchestrateWith(
 ): AsyncGenerator<OrchestrationEvent> {
   const strategy = STRATEGIES[strategyName];
   yield* strategy(ctx);
+}
+
+// ── Phase 4: Cross-Team Mission Orchestrator ────────────────────────
+
+/** Multi-team mission context — orchestrates across multiple teams */
+export interface MissionContext {
+  message: string;
+  teams: Array<{
+    teamId: string;
+    teamName: string;
+    agents: AgentInfo[];
+  }>;
+  gateway: GatewayAdapter;
+  workspacePath?: string;
+}
+
+/** Mission-level event types */
+export type MissionEvent =
+  | { type: "mission_start"; teamCount: number; agentCount: number; message: string }
+  | { type: "team_start"; teamId: string; teamName: string; agentCount: number }
+  | { type: "team_complete"; teamId: string; teamName: string; summary: string }
+  | { type: "team_error"; teamId: string; teamName: string; error: string }
+  | { type: "cross_team_merge"; summary: string }
+  | { type: "mission_complete"; summary: string; teamsCompleted: number; totalTeams: number }
+  | OrchestrationEvent;
+
+/**
+ * Orchestrate a mission across multiple teams.
+ *
+ * Flow:
+ * 1. Coordinator decomposes the task into per-team sub-tasks
+ * 2. Each team runs its own MapReduce in parallel
+ * 3. Coordinator merges all team outputs into a final deliverable
+ *
+ * Usage:
+ * ```ts
+ * for await (const event of orchestrateMission(missionCtx)) {
+ *   // Handle both MissionEvent and OrchestrationEvent
+ * }
+ * ```
+ */
+export async function* orchestrateMission(ctx: MissionContext): AsyncGenerator<MissionEvent> {
+  const { message, teams, gateway, workspacePath } = ctx;
+  const totalAgents = teams.reduce((sum, t) => sum + t.agents.length, 0);
+
+  yield {
+    type: "mission_start",
+    teamCount: teams.length,
+    agentCount: totalAgents,
+    message,
+  };
+
+  if (teams.length === 0) {
+    yield {
+      type: "mission_complete",
+      summary: "No teams available.",
+      teamsCompleted: 0,
+      totalTeams: 0,
+    };
+    return;
+  }
+
+  // Find a coordinator — the manager from the first team, or any agent
+  const coordinator =
+    teams[0].agents.find((a) => a.role?.toLowerCase().includes("manager")) || teams[0].agents[0];
+
+  if (!coordinator) {
+    yield {
+      type: "mission_complete",
+      summary: "No coordinator agent available.",
+      teamsCompleted: 0,
+      totalTeams: teams.length,
+    };
+    return;
+  }
+
+  const coordName = agentName(coordinator);
+
+  // Step 1: Coordinator decomposes the task across teams
+  yield {
+    type: "agent_thinking",
+    agentId: coordinator.id,
+    agentName: coordName,
+    position: "mission-planning",
+  };
+
+  const teamList = teams
+    .map(
+      (t) =>
+        `- **${t.teamName}** (${t.agents.length} agents: ${t.agents.map((a) => agentName(a)).join(", ")})`,
+    )
+    .join("\n");
+
+  const decomposePrompt = withMemory(
+    coordinator.id,
+    [
+      `## 🎯 Mission Briefing`,
+      ``,
+      `You are the **Mission Coordinator**. Decompose this task across ${teams.length} teams:`,
+      ``,
+      `"${message}"`,
+      ``,
+      `### Available Teams:`,
+      teamList,
+      ``,
+      `For each team, write:`,
+      `**[Team Name]:** [specific task description for this team]`,
+      ``,
+      `Be specific about what each team should deliver. Consider dependencies between teams.`,
+      workspacePath ? `\n**Workspace:** \`${workspacePath}\`` : "",
+    ].join("\n"),
+  );
+
+  let missionPlan: string;
+  try {
+    const resp = await sendWithRetry(
+      gateway,
+      decomposePrompt,
+      coordinator.id,
+      sessionKey(coordinator.id, "mission"),
+    );
+    missionPlan = processMemory(coordinator.id, extractText(resp));
+    yield {
+      type: "agent_response",
+      agentId: coordinator.id,
+      agentName: coordName,
+      text: missionPlan,
+    };
+  } catch (err) {
+    yield {
+      type: "agent_error",
+      agentId: coordinator.id,
+      agentName: coordName,
+      error: String(err),
+    };
+    yield {
+      type: "mission_complete",
+      summary: `Mission planning failed: ${err}`,
+      teamsCompleted: 0,
+      totalTeams: teams.length,
+    };
+    return;
+  }
+
+  // Step 2: Execute each team's work in parallel using MapReduce
+  console.log(`[orchestration:mission] Launching ${teams.length} teams in parallel`);
+
+  const teamResults = await Promise.allSettled(
+    teams.map(async (team) => {
+      const teamCtx: OrchestrationContext = {
+        message: `${missionPlan}\n\n---\n\nOriginal mission: "${message}"\n\nYou are part of team **${team.teamName}**. Complete YOUR team's assigned tasks.`,
+        agents: team.agents,
+        gateway,
+        teamId: team.teamId,
+        mentionedAgentIds: [],
+        workspacePath,
+      };
+
+      // Run MapReduce for this team and collect events
+      const events: OrchestrationEvent[] = [];
+      for await (const event of mapReduce(teamCtx)) {
+        events.push(event);
+      }
+
+      const summaryEvent = events.find((e) => e.type === "summary");
+      const summaryText =
+        summaryEvent?.type === "summary" ? summaryEvent.text : "No summary produced.";
+      return { team, events, summary: summaryText };
+    }),
+  );
+
+  // Yield team results
+  const successTeams: Array<{ teamName: string; summary: string }> = [];
+  for (const result of teamResults) {
+    if (result.status === "fulfilled") {
+      const { team, events, summary } = result.value;
+      yield {
+        type: "team_start",
+        teamId: team.teamId,
+        teamName: team.teamName,
+        agentCount: team.agents.length,
+      };
+
+      // Forward important events from the team
+      for (const event of events) {
+        const priority = classifyEventPriority(event);
+        if (priority !== "debug") {
+          yield event;
+        }
+      }
+
+      yield { type: "team_complete", teamId: team.teamId, teamName: team.teamName, summary };
+      successTeams.push({ teamName: team.teamName, summary });
+    } else {
+      const idx = teamResults.indexOf(result);
+      const team = teams[idx];
+      yield {
+        type: "team_error",
+        teamId: team.teamId,
+        teamName: team.teamName,
+        error: String(result.reason),
+      };
+    }
+  }
+
+  // Step 3: Coordinator merges all team outputs
+  if (successTeams.length > 0) {
+    yield {
+      type: "agent_thinking",
+      agentId: coordinator.id,
+      agentName: coordName,
+      position: "mission-merge",
+    };
+
+    const teamSummaries = successTeams
+      .map((t) => `**${t.teamName}:**\n${t.summary}`)
+      .join("\n\n---\n\n");
+
+    const mergePrompt = withMemory(
+      coordinator.id,
+      [
+        `## Mission Results — All Teams Reported`,
+        ``,
+        `Original mission: "${message}"`,
+        ``,
+        `### Team Deliverables:`,
+        teamSummaries,
+        ``,
+        `---`,
+        ``,
+        `As Mission Coordinator, produce the **FINAL MISSION REPORT**:`,
+        `1. Summary of what each team delivered`,
+        `2. Cross-team integration status`,
+        `3. Any remaining gaps or follow-ups`,
+        `4. Overall mission completion assessment`,
+      ].join("\n"),
+    );
+
+    try {
+      const resp = await sendWithRetry(
+        gateway,
+        mergePrompt,
+        coordinator.id,
+        sessionKey(coordinator.id, "mission"),
+      );
+      const finalReport = processMemory(coordinator.id, extractText(resp));
+      yield { type: "cross_team_merge", summary: finalReport };
+      yield { type: "summary", agentName: coordName, text: finalReport };
+
+      if (workspacePath) {
+        yield { type: "product_ready", workspacePath, summary: finalReport };
+      }
+    } catch (err) {
+      yield {
+        type: "agent_error",
+        agentId: coordinator.id,
+        agentName: coordName,
+        error: String(err),
+      };
+    }
+  }
+
+  yield {
+    type: "mission_complete",
+    summary: `Mission complete: ${successTeams.length}/${teams.length} teams delivered.`,
+    teamsCompleted: successTeams.length,
+    totalTeams: teams.length,
+  };
 }

@@ -66,6 +66,22 @@ function createMockGateway(): GatewayAdapter {
       const text = responses[agentId] || `Response from ${agentId}`;
       return makeMockResponse(text);
     }),
+    sendMessageStreaming: vi
+      .fn()
+      .mockImplementation(
+        async (_msg: string, agentId: string, _key: string, onDelta?: (d: unknown) => void) => {
+          // Streaming mock — delegates to the same response logic, no tool events
+          const responses: Record<string, string> = {
+            "mgr-1": "As the manager, here is my decomposition and plan for the team.",
+            "be-1": "From a backend perspective, I recommend PostgreSQL with a REST API.",
+            "fe-1": "For the frontend, I suggest React with TailwindCSS for responsive design.",
+            "tst-1": "For testing, I recommend Vitest for unit and Playwright for e2e.",
+          };
+          const text = responses[agentId] || `Response from ${agentId}`;
+          if (onDelta) onDelta({ type: "text_done", text });
+          return makeMockResponse(text);
+        },
+      ),
     listAgents: vi.fn().mockResolvedValue({ defaultId: "mgr-1", mainKey: "", agents: [] }),
     getChatHistory: vi.fn().mockResolvedValue({ sessionKey: "", messages: [] }),
     injectMessage: vi.fn().mockResolvedValue(undefined),
@@ -346,14 +362,14 @@ describe("orchestrate – error handling", () => {
   it("yields agent_error when gateway fails", async () => {
     const gw = createMockGateway();
     // Make sendMessage fail for Backend
-    (gw.sendMessage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_msg: string, agentId: string) => {
-        if (agentId === "be-1") {
-          throw new Error("Gateway connection lost");
-        }
-        return makeMockResponse(`Response from ${agentId}`);
-      },
-    );
+    const failingMock = async (_msg: string, agentId: string) => {
+      if (agentId === "be-1") {
+        throw new Error("Gateway connection lost");
+      }
+      return makeMockResponse(`Response from ${agentId}`);
+    };
+    (gw.sendMessage as ReturnType<typeof vi.fn>).mockImplementation(failingMock);
+    (gw.sendMessageStreaming as ReturnType<typeof vi.fn>).mockImplementation(failingMock);
 
     const events = await collectEvents({
       message: "what are the best practices for database design?",
@@ -380,14 +396,16 @@ describe("orchestrate – error handling", () => {
   it("completes even when all workers fail in MapReduce", async () => {
     const gw = createMockGateway();
     let callCount = 0;
-    (gw.sendMessage as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+    const failingWorkerMock = async () => {
       callCount++;
       // First call (manager decompose) succeeds, rest fail
-      if (callCount === 1) {
+      if (callCount <= 1) {
         return makeMockResponse("@Backend: do X, @FrontEndDev1: do Y, @Tester: do Z");
       }
       throw new Error("Worker failed");
-    });
+    };
+    (gw.sendMessage as ReturnType<typeof vi.fn>).mockImplementation(failingWorkerMock);
+    (gw.sendMessageStreaming as ReturnType<typeof vi.fn>).mockImplementation(failingWorkerMock);
 
     const events = await collectEvents({
       message: "build a new feature",

@@ -1,0 +1,9 @@
+{
+  "gateway": {
+    "auth": {
+      "mode": "token",
+      "token": "22bae0dde6760ffdf3c8c03c53568ded25b69b16a396332b"
+    },
+    "port": 18789
+  }
+}

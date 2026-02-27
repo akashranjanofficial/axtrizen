@@ -149,7 +149,7 @@ pub async fn spawn_agent(_agent_name: String) -> Result<String, String> {
     // ... logic to call create_pty internally? 
     // Actually, handling this via frontend calling create_pty is better.
     // We'll keep this as a stub or legacy.
-    Ok(format!("Use create_pty for embedded terminal"))
+    Ok("Use create_pty for embedded terminal".to_string())
 }
 
 #[tauri::command]

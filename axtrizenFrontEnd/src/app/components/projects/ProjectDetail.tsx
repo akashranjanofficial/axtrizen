@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { KanbanBoard } from "./KanbanBoard";
 import { PhaseTracker } from "./PhaseTracker";
+import { PhaseProgressTracker } from "./QualityGateBadge";
 import { Project } from "./ProjectList";
+import { verifyPhase, overrideGate } from "../../tauri-api";
+import type { PhaseGateStatus, VerificationReport } from "../../tauri-api";
 // import { ArtifactBrowser } from './ArtifactBrowser';
 
 interface ProjectDetailProps {
@@ -10,6 +13,33 @@ interface ProjectDetailProps {
 
 export function ProjectDetail({ project }: ProjectDetailProps) {
   const [activeTab, setActiveTab] = useState<"tasks" | "settings">("tasks");
+
+  // Quality gate phases derived from workflow template
+  const defaultPhases: PhaseGateStatus[] = [
+    { phase_id: "requirements", phase_name: "Requirements", badge: "pass", badge_emoji: "✅", last_verified: null, can_advance: true, override_record: null },
+    { phase_id: "design", phase_name: "Design", badge: "pass", badge_emoji: "✅", last_verified: null, can_advance: true, override_record: null },
+    { phase_id: "development", phase_name: "Development", badge: "pending", badge_emoji: "🔄", last_verified: null, can_advance: false, override_record: null },
+    { phase_id: "testing", phase_name: "Testing", badge: "pending", badge_emoji: "🔄", last_verified: null, can_advance: false, override_record: null },
+    { phase_id: "deployment", phase_name: "Deployment", badge: "pending", badge_emoji: "🔄", last_verified: null, can_advance: false, override_record: null },
+  ];
+
+  const handleVerify = useCallback(async (phaseId: string): Promise<VerificationReport | null> => {
+    try {
+      return await verifyPhase(project.id, phaseId, phaseId, ".", [], "warn_only");
+    } catch {
+      return null;
+    }
+  }, [project.id]);
+
+  const handleOverride = useCallback(async (phaseId: string, reason: string) => {
+    try {
+      await overrideGate(project.id, phaseId, "user", reason);
+    } catch { /* swallow */ }
+  }, [project.id]);
+
+  const handleRetry = useCallback(async (_phaseId: string) => {
+    // Re-run the phase — the orchestrator handles this
+  }, []);
 
   const tabs = [
     { id: "tasks", label: "Tasks" },
@@ -47,6 +77,17 @@ export function ProjectDetail({ project }: ProjectDetailProps) {
 
         {/* Phase Tracker */}
         <PhaseTracker currentPhase={2} />
+
+        {/* Quality Gate Badges */}
+        <div style={{ marginTop: "8px" }}>
+          <PhaseProgressTracker
+            phases={defaultPhases}
+            activePhaseIndex={2}
+            onVerify={handleVerify}
+            onOverride={handleOverride}
+            onRetry={handleRetry}
+          />
+        </div>
 
         {/* Tabs */}
         <div className="flex gap-2 border-b border-border -mb-6 mt-4 pb-0">

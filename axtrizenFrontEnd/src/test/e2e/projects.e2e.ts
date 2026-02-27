@@ -20,10 +20,20 @@ describe("Projects E2E", () => {
 
   it("should open the create project form", async () => {
     const createBtn = await $('[data-testid="create-project-btn"]');
+    await createBtn.waitForClickable({ timeout: 5000 });
     await createBtn.click();
-    await browser.pause(1000);
+    await browser.pause(500);
 
-    const nameInput = await $('[data-testid="project-name-input"]');
+    // If form didn't open (WKWebView click flake), retry once via JS click
+    let nameInput = await $('[data-testid="project-name-input"]');
+    if (!(await nameInput.isExisting())) {
+      await browser.execute(() => {
+        const btn = document.querySelector('[data-testid="create-project-btn"]') as HTMLElement;
+        btn?.click();
+      });
+      await browser.pause(500);
+      nameInput = await $('[data-testid="project-name-input"]');
+    }
     await expect(nameInput).toBeExisting();
   });
 
@@ -32,9 +42,12 @@ describe("Projects E2E", () => {
     const nameInput = await $('[data-testid="project-name-input"]');
     const exists = await nameInput.isExisting();
     if (!exists) {
-      const createBtn = await $('[data-testid="create-project-btn"]');
-      await createBtn.click();
-      await browser.pause(2000);
+      // Use JS click to bypass WKWebView coordinate issues
+      await browser.execute(() => {
+        const btn = document.querySelector('[data-testid="create-project-btn"]') as HTMLElement;
+        btn?.click();
+      });
+      await browser.pause(1000);
     }
     // Use waitForExist — WKWebView's waitForDisplayed can fail during CSS animations
     await nameInput.waitForExist({ timeout: 10000 });

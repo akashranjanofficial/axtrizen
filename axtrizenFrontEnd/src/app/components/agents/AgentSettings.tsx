@@ -38,60 +38,6 @@ interface AgentSettingsProps {
 }
 
 // Known skills list for quick selection
-const KNOWN_SKILLS = [
-  "apple-notes",
-  "apple-reminders",
-  "bear-notes",
-  "blogwatcher",
-  "blucli",
-  "bluebubbles",
-  "camsnap",
-  "canvas",
-  "clawhub",
-  "coding-agent",
-  "discord",
-  "eightctl",
-  "food-order",
-  "gemini",
-  "gifgrep",
-  "github",
-  "gog",
-  "goplaces",
-  "healthcheck",
-  "himalaya",
-  "imsg",
-  "local-places",
-  "mcporter",
-  "model-usage",
-  "nano-banana-pro",
-  "nano-pdf",
-  "notion",
-  "obsidian",
-  "openai-image-gen",
-  "openai-whisper",
-  "openai-whisper-api",
-  "openhue",
-  "oracle",
-  "ordercli",
-  "peekaboo",
-  "sag",
-  "session-logs",
-  "sherpa-onnx-tts",
-  "skill-creator",
-  "slack",
-  "songsee",
-  "sonoscli",
-  "spotify-player",
-  "summarize",
-  "things-mac",
-  "tmux",
-  "trello",
-  "video-frames",
-  "voice-call",
-  "wacli",
-  "weather",
-];
-
 const MODEL_PROVIDERS = [
   { id: "openai", name: "OpenAI", url: "https://api.openai.com/v1" },
   { id: "anthropic", name: "Anthropic", url: "https://api.anthropic.com/v1" },
@@ -109,9 +55,6 @@ export function AgentSettings({ agent }: AgentSettingsProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [skillSearch, setSkillSearch] = useState("");
-  const [addingEnvVar, setAddingEnvVar] = useState<string | null>(null);
-  const [newEnvKey, setNewEnvKey] = useState("");
   const [openclawPath, setOpenclawPath] = useState<string | null>(null);
 
   // Load config on mount
@@ -372,152 +315,17 @@ export function AgentSettings({ agent }: AgentSettingsProps) {
         </div>
       </section>
 
-      {/* --- Skills Configuration (Universal) --- */}
+      {/* --- Skills (moved to unified Skills tab) --- */}
       <section className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Box className="h-5 w-5 text-yellow-500" />
-            <h4 className="text-lg font-semibold text-foreground">Skills</h4>
-          </div>
-          <div className="relative">
-            <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder="Search skills..."
-              value={skillSearch}
-              onChange={(e) => setSkillSearch(e.target.value)}
-              className="pl-9 pr-4 py-1.5 rounded-lg border border-border bg-card text-sm focus:ring-1 focus:ring-primary focus:outline-none w-64"
-            />
-          </div>
+        <div className="flex items-center gap-2">
+          <Box className="h-5 w-5 text-yellow-500" />
+          <h4 className="text-lg font-semibold text-foreground">Skills</h4>
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {KNOWN_SKILLS.filter((s) => s.toLowerCase().includes(skillSearch.toLowerCase()))
-            .toSorted()
-            .map((skillId) => {
-              const isEnabled = !!config?.skills?.entries?.[skillId]?.enabled;
-              const skillConf = config?.skills?.entries?.[skillId] || {};
-              const hasEnv = skillConf.env && Object.keys(skillConf.env).length > 0;
-
-              return (
-                <div
-                  key={skillId}
-                  className={`p-4 rounded-xl border transition-all ${isEnabled ? "border-yellow-500/50 bg-yellow-500/5" : "border-border bg-card/50 hover:bg-card"}`}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-semibold text-sm">{skillId}</span>
-                    <input
-                      type="checkbox"
-                      checked={isEnabled}
-                      onChange={(e) =>
-                        toggleSection(["skills", "entries", skillId], e.target.checked, {
-                          enabled: true,
-                          env: {},
-                        })
-                      }
-                      className="rounded border-border text-yellow-500 focus:ring-yellow-500 h-4 w-4"
-                    />
-                  </div>
-
-                  {isEnabled && (
-                    <div className="space-y-3 mt-4 pt-3 border-t border-border/50">
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs text-muted-foreground uppercase font-bold tracking-wider">
-                          <span>Env Vars</span>
-                          <button
-                            onClick={() => {
-                              // Toggle add mode for this skill
-                              setAddingEnvVar((prev) => (prev === skillId ? null : skillId));
-                              setNewEnvKey("");
-                            }}
-                            className="hover:text-foreground transition-colors"
-                            title="Add Variable"
-                          >
-                            <Plus className="h-3 w-3" />
-                          </button>
-                        </div>
-
-                        {/* Add New Var Input */}
-                        {addingEnvVar === skillId && (
-                          <div className="flex gap-2 items-center animate-in fade-in slide-in-from-top-1">
-                            <input
-                              autoFocus
-                              type="text"
-                              value={newEnvKey}
-                              onChange={(e) => setNewEnvKey(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" && newEnvKey.trim()) {
-                                  updateNestedConfig(
-                                    ["skills", "entries", skillId, "env", newEnvKey.trim()],
-                                    "",
-                                  );
-                                  setAddingEnvVar(null);
-                                  setNewEnvKey("");
-                                }
-                              }}
-                              className="flex-1 min-w-0 bg-muted/50 border border-primary/50 rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-primary"
-                              placeholder="KEY_NAME"
-                            />
-                            <button
-                              onClick={() => {
-                                if (newEnvKey.trim()) {
-                                  updateNestedConfig(
-                                    ["skills", "entries", skillId, "env", newEnvKey.trim()],
-                                    "",
-                                  );
-                                  setAddingEnvVar(null);
-                                  setNewEnvKey("");
-                                }
-                              }}
-                              className="bg-primary text-primary-foreground p-1 rounded hover:bg-primary/90"
-                            >
-                              <Plus className="h-3 w-3" />
-                            </button>
-                          </div>
-                        )}
-
-                        {skillConf.env &&
-                          Object.entries(skillConf.env).map(([key, val]: any) => (
-                            <div key={key} className="flex gap-2 items-center group">
-                              <div className="bg-muted px-2 py-1 rounded text-xs font-mono text-muted-foreground select-none">
-                                {key}
-                              </div>
-                              <input
-                                type="password"
-                                value={val}
-                                onChange={(e) =>
-                                  updateNestedConfig(
-                                    ["skills", "entries", skillId, "env", key],
-                                    e.target.value,
-                                  )
-                                }
-                                className="flex-1 min-w-0 bg-transparent border-b border-border text-xs py-1 focus:outline-none focus:border-yellow-500 transition-colors"
-                                placeholder="Value"
-                              />
-                              <button
-                                onClick={() => {
-                                  const newEnv = { ...skillConf.env };
-                                  delete newEnv[key];
-                                  updateNestedConfig(["skills", "entries", skillId, "env"], newEnv);
-                                }}
-                                className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </div>
-                          ))}
-                        {(!skillConf.env || Object.keys(skillConf.env).length === 0) &&
-                          !addingEnvVar && (
-                            <div className="text-xs text-muted-foreground italic">
-                              No environment variables set.
-                            </div>
-                          )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+        <div className="p-4 rounded-xl border border-border bg-card/50 text-center">
+          <p className="text-sm text-muted-foreground">
+            Skills management has moved to the <strong>Skills</strong> tab for a unified experience
+            with catalog browsing, AI recommendations, and inline configuration.
+          </p>
         </div>
       </section>
 

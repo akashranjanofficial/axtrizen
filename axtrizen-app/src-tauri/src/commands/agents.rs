@@ -163,17 +163,32 @@ pub async fn update_agent(
     state.call("agents.update", params).await
 }
 
-/// Delete an agent
+/// Delete an agent via Gateway.
+/// Delete an agent via Gateway.
+/// Uses a 10s timeout so the UI doesn't hang when Gateway is unavailable.
 #[tauri::command]
 pub async fn delete_agent(
     agent_id: String,
     delete_files: Option<bool>,
     state: tauri::State<'_, GatewayClient>,
 ) -> Result<Value, String> {
-    state.call("agents.delete", json!({
+    let params = json!({
         "agentId": agent_id,
         "deleteFiles": delete_files.unwrap_or(true)
-    })).await
+    });
+
+    // Short timeout — agents live in the Gateway, so if it's down we must
+    // tell the user instead of hanging for 120s.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.call("agents.delete", params),
+    )
+    .await
+    {
+        Ok(Ok(val)) => Ok(val),
+        Ok(Err(e)) => Err(format!("Gateway error: {}. Is the OpenClaw Gateway running?", e)),
+        Err(_) => Err("Could not reach the Gateway (timed out). Start the Gateway with ./dev.sh and try again.".to_string()),
+    }
 }
 
 /// List agent files (SOUL.md, MEMORY.md, TOOLS.md, etc.)

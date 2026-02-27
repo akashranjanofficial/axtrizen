@@ -1,15 +1,65 @@
-import { Bot, DollarSign, Cpu, FolderOpen, Bell, Search, User, Sun, Moon, X } from "lucide-react";
-import { useState, useEffect, useRef } from "react";
+import { Bot, Bell, Search, User, Sun, Moon, X, WifiOff } from "lucide-react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { AgentsView } from "./components/AgentsView";
 import { ChatWindow } from "./components/ChatWindow";
 import { Dashboard } from "./components/Dashboard";
-import { ProjectsView } from "./components/ProjectsView";
-import { SettingsView } from "./components/SettingsView";
 import { Sidebar } from "./components/Sidebar";
-import { TeamsView } from "./components/TeamsView";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { SetupWizard } from "./components/SetupWizard";
 import { activityStore, type ActivityEvent } from "./stores/activity-store";
 import { agentStore } from "./stores/agent-store";
 import { connectToGateway } from "./tauri-api";
+
+// Lazy-loaded views (not mounted on startup)
+const ProjectsView = lazy(() =>
+  import("./components/ProjectsView").then((m) => ({ default: m.ProjectsView })),
+);
+const TeamsView = lazy(() =>
+  import("./components/TeamsView").then((m) => ({ default: m.TeamsView })),
+);
+const SettingsView = lazy(() =>
+  import("./components/SettingsView").then((m) => ({ default: m.SettingsView })),
+);
+const MissionControlView = lazy(() =>
+  import("./components/MissionControlView").then((m) => ({ default: m.MissionControlView })),
+);
+const VoicePipelinePanel = lazy(() =>
+  import("./components/voice/VoicePipelinePanel").then((m) => ({ default: m.VoicePipelinePanel })),
+);
+const UsageDashboard = lazy(() =>
+  import("./components/UsageDashboard").then((m) => ({ default: m.UsageDashboard })),
+);
+const GaReleaseDashboard = lazy(() =>
+  import("./components/GaReleaseDashboard").then((m) => ({ default: m.GaReleaseDashboard })),
+);
+
+// Loading fallback for lazy views
+function ViewLoader() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "60vh",
+        gap: "12px",
+        color: "var(--muted-foreground)",
+      }}
+    >
+      <div
+        style={{
+          width: "24px",
+          height: "24px",
+          border: "3px solid currentColor",
+          borderTopColor: "transparent",
+          borderRadius: "50%",
+          animation: "spin 0.8s linear infinite",
+        }}
+      />
+      <span style={{ fontSize: "14px" }}>Loading...</span>
+    </div>
+  );
+}
 
 export default function App() {
   const [activeMenu, setActiveMenu] = useState("dashboard");
@@ -20,6 +70,15 @@ export default function App() {
     type: "agent" | "team";
     id: string;
   } | null>(null);
+
+  // Setup wizard state
+  const [setupDone, setSetupDone] = useState(
+    () => localStorage.getItem("axtrizen_setup_complete") === "true",
+  );
+
+  // Gateway connection state
+  const [gatewayConnected, setGatewayConnected] = useState(false);
+  const hasEverConnected = useRef(false);
 
   // Navigate to chat with a specific target
   const openGroupChat = (teamId: string) => {
@@ -39,12 +98,15 @@ export default function App() {
         const ok = await connectToGateway();
         if (ok) {
           console.log("✅ Connected to OpenClaw Gateway");
+          setGatewayConnected(true);
+          hasEverConnected.current = true;
         }
       } catch (err) {
         console.warn(`Gateway connect attempt ${attempt} failed:`, err);
-        // Retry once after 3s (Gateway might still be starting)
-        if (attempt < 3 && !cancelled) {
-          setTimeout(() => tryConnect(attempt + 1), 3000);
+        setGatewayConnected(false);
+        // Retry with exponential backoff (3s, 9s, 27s)
+        if (attempt < 5 && !cancelled) {
+          setTimeout(() => tryConnect(attempt + 1), 3000 * Math.pow(2, attempt - 1));
         } else {
           console.error("❌ Could not connect to Gateway after retries. Is `openclaw` running?");
         }
@@ -52,8 +114,22 @@ export default function App() {
     };
 
     tryConnect(1);
+
+    // Gateway watchdog: check every 30s
+    const watchdog = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const ok = await connectToGateway();
+        setGatewayConnected(ok);
+        if (ok) hasEverConnected.current = true;
+      } catch {
+        setGatewayConnected(false);
+      }
+    }, 30000);
+
     return () => {
       cancelled = true;
+      clearInterval(watchdog);
     };
   }, []);
 
@@ -138,6 +214,25 @@ export default function App() {
   // Profile dropdown
   const [showProfile, setShowProfile] = useState(false);
 
+  // Click-outside handler to close header dropdowns
+  const headerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (headerRef.current && !headerRef.current.contains(e.target as Node)) {
+        setShowSearch(false);
+        setShowNotifications(false);
+        setShowProfile(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Show setup wizard on first launch
+  if (!setupDone) {
+    return <SetupWizard onComplete={() => setSetupDone(true)} />;
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground relative overflow-hidden transition-colors duration-300">
       {/* Mesh Gradient Background - Only visible in dark mode or adapted for light */}
@@ -166,21 +261,76 @@ export default function App() {
       >
         {/* ChatWindow is always mounted to preserve state & WebSocket connection */}
         <div style={{ display: activeMenu === "chat" ? "block" : "none" }}>
-          <ChatWindow chatTarget={chatTarget} />
+          <ErrorBoundary viewName="Chat">
+            <ChatWindow chatTarget={chatTarget} />
+          </ErrorBoundary>
         </div>
 
         {/* AgentsView is always mounted to preserve terminal PTY sessions */}
         <div style={{ display: activeMenu === "agents" ? "block" : "none" }}>
-          <AgentsView />
+          <ErrorBoundary viewName="Agents">
+            <AgentsView />
+          </ErrorBoundary>
         </div>
 
-        {activeMenu === "projects" ? (
-          <ProjectsView />
-        ) : activeMenu === "teams" ? (
-          <TeamsView onOpenGroupChat={openGroupChat} />
+        {/* ProjectsView is always mounted to preserve orchestration execution state */}
+        <div style={{ display: activeMenu === "projects" ? "block" : "none" }}>
+          <ErrorBoundary viewName="Projects">
+            <Suspense fallback={<ViewLoader />}>
+              <ProjectsView />
+            </Suspense>
+          </ErrorBoundary>
+        </div>
+
+        {activeMenu === "teams" ? (
+          <ErrorBoundary viewName="Teams">
+            <Suspense fallback={<ViewLoader />}>
+              <TeamsView onOpenGroupChat={openGroupChat} />
+            </Suspense>
+          </ErrorBoundary>
         ) : activeMenu === "settings" ? (
-          <SettingsView />
-        ) : activeMenu !== "chat" && activeMenu !== "agents" ? (
+          <ErrorBoundary viewName="Settings">
+            <Suspense fallback={<ViewLoader />}>
+              <SettingsView />
+            </Suspense>
+          </ErrorBoundary>
+        ) : activeMenu === "mission" ? (
+          <ErrorBoundary viewName="Mission Control">
+            <Suspense fallback={<ViewLoader />}>
+              <MissionControlView />
+            </Suspense>
+          </ErrorBoundary>
+        ) : activeMenu === "voice" ? (
+          <ErrorBoundary viewName="Voice Pipeline">
+            <Suspense fallback={<ViewLoader />}>
+              <div className="h-[calc(100vh-73px)] overflow-y-auto">
+                <div className="max-w-4xl mx-auto px-6 py-8">
+                  <VoicePipelinePanel />
+                </div>
+              </div>
+            </Suspense>
+          </ErrorBoundary>
+        ) : activeMenu === "usage" ? (
+          <ErrorBoundary viewName="Usage Dashboard">
+            <Suspense fallback={<ViewLoader />}>
+              <div className="h-[calc(100vh-73px)] overflow-y-auto">
+                <div className="max-w-5xl mx-auto px-6 py-8">
+                  <UsageDashboard />
+                </div>
+              </div>
+            </Suspense>
+          </ErrorBoundary>
+        ) : activeMenu === "release" ? (
+          <ErrorBoundary viewName="GA Release">
+            <Suspense fallback={<ViewLoader />}>
+              <div className="h-[calc(100vh-73px)] overflow-y-auto">
+                <div className="max-w-5xl mx-auto px-6 py-8">
+                  <GaReleaseDashboard />
+                </div>
+              </div>
+            </Suspense>
+          </ErrorBoundary>
+        ) : activeMenu !== "chat" && activeMenu !== "agents" && activeMenu !== "projects" ? (
           <>
             {/* Top Navigation */}
             <header className="border-b border-border bg-card/50 backdrop-blur-xl sticky top-0 z-20">
@@ -188,14 +338,12 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   {/* Page Title */}
                   <div>
-                    <h1 className="text-xl font-medium">Mission Control</h1>
-                    <p className="text-xs text-muted-foreground">
-                      Monitor and manage your AI agent fleet
-                    </p>
+                    <h1 className="text-xl font-medium">Dashboard</h1>
+                    <p className="text-xs text-muted-foreground">Overview of your AI agent fleet</p>
                   </div>
 
                   {/* Right Actions */}
-                  <div className="flex items-center gap-3">
+                  <div ref={headerRef} className="flex items-center gap-3">
                     {/* Search */}
                     <div className="relative">
                       <button
@@ -379,6 +527,33 @@ export default function App() {
             </main>
           </>
         ) : null}
+
+        {/* Gateway Disconnected Banner — only shows after a successful connection drops */}
+        {hasEverConnected.current && !gatewayConnected && (
+          <div
+            style={{
+              position: "fixed",
+              bottom: "20px",
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              padding: "10px 20px",
+              borderRadius: "12px",
+              background: "rgba(239, 68, 68, 0.15)",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              backdropFilter: "blur(10px)",
+              color: "#fca5a5",
+              fontSize: "13px",
+              fontWeight: 600,
+              zIndex: 100,
+            }}
+          >
+            <WifiOff style={{ width: "16px", height: "16px" }} />
+            Gateway disconnected — retrying...
+          </div>
+        )}
       </div>
     </div>
   );

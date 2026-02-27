@@ -128,12 +128,12 @@ export function Dashboard() {
             <div>
               <div className="flex justify-between text-sm mb-2">
                 <span className="text-muted-foreground">Agent Load</span>
-                <span>{agentCount} / 4</span>
+                <span>{agentCount} active</span>
               </div>
               <div className="h-2 rounded-full bg-muted overflow-hidden">
                 <div
                   className="h-full rounded-full bg-green-500 transition-all duration-500"
-                  style={{ width: `${Math.min(100, (agentCount / 4) * 100)}%` }}
+                  style={{ width: `${agentCount > 0 ? Math.min(100, agentCount * 20) : 0}%` }}
                 />
               </div>
             </div>

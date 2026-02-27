@@ -32,11 +32,20 @@ type Listener = () => void;
 class AgentStore {
   private agents: Agent[] = [];
   private listeners = new Set<Listener>();
+  private syncInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.sync();
     // Periodically sync to catch external changes
-    setInterval(() => this.sync(), 5000);
+    this.syncInterval = setInterval(() => this.sync(), 5000);
+  }
+
+  /** Stop background sync — call during HMR teardown */
+  destroy() {
+    if (this.syncInterval) {
+      clearInterval(this.syncInterval);
+      this.syncInterval = null;
+    }
   }
 
   async sync() {
@@ -97,30 +106,20 @@ class AgentStore {
   }
 
   async removeAgent(id: string) {
-    // Optimistic removal — update UI immediately
-    this.agents = this.agents.filter((a) => a.id !== id);
-    this.notify();
-
     try {
       await deleteAgent(id);
       // Also stop the terminal session
       await killAgent(id).catch(() => {});
-      // Sync to confirm backend state
-      await this.sync();
     } catch (e: any) {
       const msg = typeof e === "string" ? e : e?.message || "";
       // If agent is already gone, treat as success
-      if (msg.toLowerCase().includes("not found")) {
-        console.warn(`Agent ${id} not found on backend, treating as deleted.`);
-        await this.sync();
-        return;
+      if (!msg.toLowerCase().includes("not found")) {
+        console.error("Failed to remove agent from backend:", e);
+        throw e;
       }
-
-      console.error("Failed to remove agent from backend:", e);
-      // Re-sync to restore true state if backend failed (and it wasn't a "not found" error)
-      await this.sync();
-      throw e;
     }
+    // Sync after backend confirms deletion — avoids flickering from premature optimistic removal
+    await this.sync();
   }
 
   async startAgent(id: string, name: string) {
@@ -160,3 +159,10 @@ class AgentStore {
 }
 
 export const agentStore = new AgentStore();
+
+// Clean up on HMR to prevent interval leak
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    agentStore.destroy();
+  });
+}

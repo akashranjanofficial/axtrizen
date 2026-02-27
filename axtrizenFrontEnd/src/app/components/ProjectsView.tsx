@@ -20,6 +20,11 @@ import {
   Send,
 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback } from "react";
+import { ProjectBoard } from "./ProjectBoard";
+import { FileBrowser } from "./FileBrowser";
+import { FileCheck, FileCode } from "lucide-react";
+import Markdown from "react-markdown";
+import { SmartProjectSetupWizard } from "./projects/SmartProjectSetupWizard";
 import {
   getProjects,
   createProject,
@@ -31,9 +36,15 @@ import {
   stopProjectExecution,
   getExecutionStatus,
   resumeProjectExecution,
+  restartWithFeedback,
+  getProjectWorkflowTemplate,
+  getWorkflowTemplates,
+  setProjectWorkflowTemplate,
   type Project,
   type Team,
   type ExecutionLogEntry,
+  type WorkflowTemplate,
+  type WorkflowTemplateSummary,
 } from "../tauri-api";
 
 // ========== Editable drafts type ==========
@@ -51,6 +62,8 @@ export function ProjectsView() {
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [availableTemplates, setAvailableTemplates] = useState<WorkflowTemplateSummary[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("software_development");
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamDropdownOpen, setTeamDropdownOpen] = useState(false);
   const selectedProjectRef = useRef<Project | null>(null);
@@ -68,12 +81,26 @@ export function ProjectsView() {
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionError, setExecutionError] = useState<string | null>(null);
   const activityFeedRef = useRef<HTMLDivElement>(null);
+  const safetyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Feedback state
   const [waitingForFeedback, setWaitingForFeedback] = useState(false);
   const [feedbackPhase, setFeedbackPhase] = useState("");
   const [feedbackInput, setFeedbackInput] = useState("");
   const [isSendingFeedback, setIsSendingFeedback] = useState(false);
+
+  // Final report state
+  const [finalReport, setFinalReport] = useState<string | null>(null);
+
+  // Revision feedback state (post-completion)
+  const [revisionFeedback, setRevisionFeedback] = useState("");
+  const [isSubmittingRevision, setIsSubmittingRevision] = useState(false);
+
+  // Workflow template state
+  const [projectTemplate, setProjectTemplate] = useState<WorkflowTemplate | null>(null);
+
+  // View state
+  const [activeTab, setActiveTab] = useState<"board" | "files">("board");
 
   // Keep refs in sync so polling callback sees latest state
   useEffect(() => {
@@ -92,6 +119,17 @@ export function ProjectsView() {
       });
     }
   }, [selectedProject]);
+
+  // Load the workflow template when a project is selected
+  useEffect(() => {
+    if (!selectedProject) {
+      setProjectTemplate(null);
+      return;
+    }
+    getProjectWorkflowTemplate(selectedProject.id)
+      .then(setProjectTemplate)
+      .catch(() => setProjectTemplate(null));
+  }, [selectedProject?.id]);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -154,6 +192,15 @@ export function ProjectsView() {
 
   // ========== Handlers ==========
 
+  // Fetch workflow templates when opening the create form
+  useEffect(() => {
+    if (isCreating) {
+      getWorkflowTemplates()
+        .then(setAvailableTemplates)
+        .catch((err) => console.warn("Failed to load templates:", err));
+    }
+  }, [isCreating]);
+
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProjectName.trim()) {
@@ -161,11 +208,18 @@ export function ProjectsView() {
     }
     try {
       const project = await createProject(newProjectName, newProjectDesc.trim() || null, null);
+      // Assign the selected workflow template
+      if (selectedTemplateId) {
+        await setProjectWorkflowTemplate(project.id, selectedTemplateId).catch((err) =>
+          console.warn("Failed to assign template:", err),
+        );
+      }
       await fetchProjects();
       setSelectedProject(project);
       setIsCreating(false);
       setNewProjectName("");
       setNewProjectDesc("");
+      setSelectedTemplateId("software_development");
     } catch (error) {
       console.error("Failed to create project:", error);
     }
@@ -211,8 +265,28 @@ export function ProjectsView() {
     setExecutionError(null);
     setIsExecuting(true);
     setExecutionLogs([]);
+    // Clear any previous safety timeout
+    if (safetyTimeoutRef.current) {
+      clearTimeout(safetyTimeoutRef.current);
+      safetyTimeoutRef.current = null;
+    }
     try {
       await startProjectExecution(project.id);
+      // Safety timeout: if no logs arrive within 60s, check execution status
+      safetyTimeoutRef.current = setTimeout(async () => {
+        safetyTimeoutRef.current = null;
+        try {
+          const status = await getExecutionStatus(project.id);
+          if (status.status !== "running" && status.logs.length === 0) {
+            setIsExecuting(false);
+            setExecutionError(
+              "Execution may have failed to start. Please check that the Gateway is running and try again.",
+            );
+          }
+        } catch {
+          // Ignore — if we can't fetch status, the execution might still be starting
+        }
+      }, 60000);
     } catch (error) {
       console.error("Failed to start project execution:", error);
       setExecutionError(String(error));
@@ -229,12 +303,47 @@ export function ProjectsView() {
     }
   };
 
+  const handleRevisionSubmit = async (project: Project) => {
+    if (!revisionFeedback.trim()) return;
+    setIsSubmittingRevision(true);
+    setExecutionError(null);
+    setIsExecuting(true);
+    setExecutionLogs([]);
+    setFinalReport(null);
+    try {
+      await restartWithFeedback(project.id, revisionFeedback.trim());
+      setRevisionFeedback("");
+      // Safety timeout same as handleStartProject
+      safetyTimeoutRef.current = setTimeout(async () => {
+        safetyTimeoutRef.current = null;
+        try {
+          const status = await getExecutionStatus(project.id);
+          if (status.status !== "running" && status.logs.length === 0) {
+            setIsExecuting(false);
+            setExecutionError(
+              "Revision execution may have failed to start. Please check that the Gateway is running.",
+            );
+          }
+        } catch {
+          // Ignore
+        }
+      }, 60000);
+    } catch (error) {
+      console.error("Failed to restart with feedback:", error);
+      setExecutionError(String(error));
+      setIsExecuting(false);
+    } finally {
+      setIsSubmittingRevision(false);
+    }
+  };
+
   // Listen for orchestration events from Tauri backend
   useEffect(() => {
     let unlistenLog: (() => void) | undefined;
     let unlistenPhase: (() => void) | undefined;
     let unlistenComplete: (() => void) | undefined;
     let unlistenFeedback: (() => void) | undefined;
+    let unlistenFinalReport: (() => void) | undefined;
 
     const setup = async () => {
       try {
@@ -318,6 +427,16 @@ export function ProjectsView() {
             }
           },
         );
+        unlistenFinalReport = await listen<{
+          projectId: string;
+          report: string;
+          workspacePath: string | null;
+        }>("project-final-report", (event) => {
+          const currentProject = selectedProjectRef.current;
+          if (currentProject && event.payload.projectId === currentProject.id) {
+            setFinalReport(event.payload.report);
+          }
+        });
       } catch (err) {
         console.warn("Failed to set up Tauri event listeners:", err);
       }
@@ -330,11 +449,53 @@ export function ProjectsView() {
       unlistenPhase?.();
       unlistenComplete?.();
       unlistenFeedback?.();
+      unlistenFinalReport?.();
+      // Clean up safety timeout on unmount
+      if (safetyTimeoutRef.current) {
+        clearTimeout(safetyTimeoutRef.current);
+      }
     };
   }, []);
 
   // Load existing execution logs when selecting a project
   const selectedProjectId = selectedProject?.id ?? null;
+
+  // Load final report from workspace if it exists (for completed projects)
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setFinalReport(null);
+      return;
+    }
+    const loadReport = async () => {
+      try {
+        const proj = projects.find((p) => p.id === selectedProjectId);
+        if (proj?.status === "completed" && proj?.workspace_path) {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const report: string = await invoke("read_file_content", {
+            path: proj.workspace_path + "/FINAL_REPORT.md",
+          });
+          // Strip the markdown header we added
+          const lines = report.split("\n");
+          const dashIndex = lines.findIndex((l: string) => l.startsWith("---"));
+          setFinalReport(
+            dashIndex >= 0
+              ? lines
+                  .slice(dashIndex + 2)
+                  .join("\n")
+                  .trim()
+              : report,
+          );
+        }
+        // Don't clear finalReport in the else branch — it may already be set
+        // via the real-time "project-final-report" Tauri event listener.
+      } catch {
+        // Don't clear finalReport on error — it may have been set by the event listener
+        // before the file was written or before the project status updated.
+      }
+    };
+    loadReport();
+  }, [selectedProjectId, projects]);
+
   useEffect(() => {
     if (!selectedProjectId) {
       setExecutionLogs([]);
@@ -449,8 +610,18 @@ export function ProjectsView() {
     setIsEditing(true);
   };
 
-  // ========== SDLC phases ==========
-  const phaseOrder = ["draft", "requirements", "design", "development", "testing", "deployment"];
+  // ========== Workflow phases (dynamic from template) ==========
+  const phaseOrder = projectTemplate
+    ? ["draft", ...projectTemplate.phases.map(p => p.id), "completed"]
+    : ["draft", "planning", "design", "development", "testing", "completed"];
+
+  const phaseDisplayNames: Record<string, string> = projectTemplate
+    ? Object.fromEntries([
+        ["draft", "Draft"],
+        ...projectTemplate.phases.map(p => [p.id, p.name]),
+        ["completed", "Completed"],
+      ])
+    : {};
 
   return (
     <div className="h-[calc(100vh-73px)] flex">
@@ -580,6 +751,46 @@ export function ProjectsView() {
                 />
               </div>
 
+              {/* Workflow Template Picker */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Workflow Template</label>
+                <p className="text-xs text-muted-foreground">
+                  Choose the execution workflow for this project. This determines the phases,
+                  prompts, and board labels used during orchestration.
+                </p>
+                {availableTemplates.length > 0 ? (
+                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                    {availableTemplates.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setSelectedTemplateId(t.id)}
+                        className={`flex items-start gap-3 p-3 rounded-xl border text-left transition-all ${
+                          selectedTemplateId === t.id
+                            ? "border-primary bg-primary/10 ring-1 ring-primary/30"
+                            : "border-border bg-background hover:bg-muted/50"
+                        }`}
+                      >
+                        <span className="text-xl mt-0.5">{t.icon}</span>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{t.name}</p>
+                          <p className="text-xs text-muted-foreground line-clamp-2">
+                            {t.description}
+                          </p>
+                          <p className="text-xs text-muted-foreground/60 mt-1">
+                            {t.phase_count} phases · {t.domain}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground py-3 text-center border border-dashed border-border rounded-xl">
+                    Loading templates…
+                  </div>
+                )}
+              </div>
+
               <div className="space-y-2">
                 <label className="text-sm font-medium">Requirements & Context</label>
                 <textarea
@@ -591,6 +802,9 @@ export function ProjectsView() {
                   className="w-full rounded-xl border border-border bg-background px-4 py-3 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20 resize-none font-mono"
                 />
               </div>
+
+              {/* AI Team Suggestion (Sprint S5) */}
+              <SmartProjectSetupWizard description={newProjectDesc} />
 
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-border">
                 <button
@@ -635,13 +849,30 @@ export function ProjectsView() {
                 )}
                 {isExecuting ? (
                   <button
-                    data-testid="stop-execution-btn"
+                    data-testid="pause-execution-btn"
                     onClick={() => handlePauseProject(selectedProject)}
                     className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-sm transition-colors font-medium"
                   >
                     <Square className="w-4 h-4" /> Stop Execution
                   </button>
-                ) : selectedProject.status !== "completed" ? (
+                ) : selectedProject.status === "completed" ? (
+                  <span className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 text-green-500 border border-green-500/20 rounded-lg text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4" /> Completed
+                  </span>
+                ) : (selectedProject.status === "active" || selectedProject.status === "paused" || selectedProject.status === "error") &&
+                  selectedProject.phase &&
+                  selectedProject.phase !== "requirements" &&
+                  selectedProject.phase !== "completed" ? (
+                  <button
+                    data-testid="resume-execution-btn"
+                    onClick={() => handleStartProject(selectedProject)}
+                    disabled={!selectedProject.team_id || isExecuting}
+                    title={!selectedProject.team_id ? "Assign a team first" : `Resume from ${selectedProject.phase} phase`}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 border border-amber-500/20 rounded-lg text-sm transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Play className="w-4 h-4" /> Resume Execution
+                  </button>
+                ) : (
                   <button
                     data-testid="start-execution-btn"
                     onClick={() => handleStartProject(selectedProject)}
@@ -651,10 +882,6 @@ export function ProjectsView() {
                   >
                     <Play className="w-4 h-4" /> Start Execution
                   </button>
-                ) : (
-                  <span className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 text-green-500 border border-green-500/20 rounded-lg text-sm font-medium">
-                    <CheckCircle2 className="w-4 h-4" /> Completed
-                  </span>
                 )}
                 <button
                   onClick={() => handleDeleteProject(selectedProject.id)}
@@ -714,6 +941,76 @@ export function ProjectsView() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Main Content Area (2 cols) */}
               <div className="lg:col-span-2 space-y-6">
+                {/* Final Report — shown when project is completed */}
+                {selectedProject.status === "completed" && finalReport && (
+                  <div className="bg-green-500/5 border-2 border-green-500/30 rounded-2xl p-6 relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-green-500/5 rounded-full -translate-y-1/2 translate-x-1/2" />
+                    <h3 className="text-lg font-semibold mb-4 flex items-center gap-2 text-green-400">
+                      <FileCheck className="w-5 h-5" />
+                      Final Deliverables Report
+                    </h3>
+                    <div className="report-markdown text-sm text-muted-foreground leading-relaxed [&_h2]:text-base [&_h2]:font-semibold [&_h2]:text-green-400 [&_h2]:mt-5 [&_h2]:mb-2 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-foreground [&_h3]:mt-4 [&_h3]:mb-2 [&_strong]:text-foreground [&_strong]:font-medium [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_li]:my-0.5 [&_table]:w-full [&_table]:my-3 [&_table]:border-collapse [&_th]:text-left [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground [&_th]:border-b [&_th]:border-border [&_th]:pb-2 [&_th]:pr-4 [&_td]:text-xs [&_td]:py-1.5 [&_td]:pr-4 [&_td]:border-b [&_td]:border-border/50 [&_code]:bg-muted/50 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs [&_code]:font-mono [&_pre]:bg-muted/30 [&_pre]:p-3 [&_pre]:rounded-lg [&_pre]:my-3 [&_pre]:overflow-x-auto [&_p]:my-1.5 [&_hr]:border-border/30 [&_hr]:my-4">
+                      <Markdown>{finalReport}</Markdown>
+                    </div>
+                    {selectedProject.workspace_path && (
+                      <div className="mt-4 pt-4 border-t border-green-500/20 flex items-center gap-3">
+                        <button
+                          onClick={async () => {
+                            try {
+                              const { invoke } = await import("@tauri-apps/api/core");
+                              await invoke("open_workspace", {
+                                path: selectedProject.workspace_path!,
+                              });
+                            } catch (e) {
+                              console.error("Failed to open workspace", e);
+                            }
+                          }}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/30 rounded-lg text-sm font-medium transition-colors"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          Open Project Workspace
+                        </button>
+                        <span className="text-xs text-muted-foreground font-mono">
+                          {selectedProject.workspace_path}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Post-Completion Feedback — request revisions after project is done */}
+                {selectedProject.status === "completed" && !isExecuting && (
+                  <div className="bg-blue-500/5 border-2 border-blue-500/30 rounded-2xl p-6">
+                    <h3 className="text-lg font-semibold mb-2 flex items-center gap-2 text-blue-400">
+                      <MessageSquare className="w-5 h-5" />
+                      Request Revisions
+                    </h3>
+                    <p className="text-xs text-muted-foreground mb-4">
+                      Provide feedback on the deliverables and the agents will revise accordingly.
+                    </p>
+                    <textarea
+                      value={revisionFeedback}
+                      onChange={(e) => setRevisionFeedback(e.target.value)}
+                      placeholder="Describe what needs to be changed, improved, or added..."
+                      rows={4}
+                      className="w-full rounded-xl border border-border bg-background px-4 py-3 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/20 resize-y mb-3"
+                      disabled={isSubmittingRevision}
+                    />
+                    <button
+                      onClick={() => handleRevisionSubmit(selectedProject)}
+                      disabled={!revisionFeedback.trim() || isSubmittingRevision}
+                      className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isSubmittingRevision ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                      {isSubmittingRevision ? "Revising..." : "Revise"}
+                    </button>
+                  </div>
+                )}
+
                 {/* Requirements Section */}
                 <div className="bg-card/30 border border-border rounded-2xl p-6">
                   <h3 className="text-lg font-medium mb-4 flex items-center gap-2">
@@ -759,9 +1056,11 @@ export function ProjectsView() {
                   )}
                 </div>
 
-                {/* SDLC Phase Progress */}
+                {/* Workflow Phase Progress */}
                 <div className="bg-card/30 border border-border rounded-2xl p-6">
-                  <h3 className="text-lg font-medium mb-6">SDLC Progress</h3>
+                  <h3 className="text-lg font-medium mb-6">
+                    {projectTemplate ? `${projectTemplate.icon} ${projectTemplate.name}` : "Workflow"} Progress
+                  </h3>
 
                   <div className="relative">
                     {/* Progress Line */}
@@ -811,13 +1110,60 @@ export function ProjectsView() {
                               data-testid={`phase-node-${phase}`}
                               className={`text-[10px] font-medium uppercase tracking-wider mt-1 ${isActive ? "text-primary" : "text-muted-foreground"}`}
                             >
-                              {phase}
+                              {phaseDisplayNames[phase] || phase}
                             </span>
                           </div>
                         );
                       })}
                     </div>
                   </div>
+                </div>
+
+                {/* Tabs for Board vs Files */}
+                <div className="flex items-center gap-1 bg-muted/30 p-1 rounded-xl w-max mb-4 border border-border">
+                  <button
+                    onClick={() => setActiveTab("board")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      activeTab === "board"
+                        ? "bg-card text-foreground shadow-sm ring-1 ring-border"
+                        : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <Square className="w-4 h-4" />
+                    Board
+                  </button>
+                  <button
+                    onClick={() => setActiveTab("files")}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      activeTab === "files"
+                        ? "bg-card text-foreground shadow-sm ring-1 ring-border"
+                        : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                    }`}
+                  >
+                    <FileCode className="w-4 h-4" />
+                    Workspace Files
+                  </button>
+                </div>
+
+                {/* Tab Content */}
+                <div className="mb-6">
+                  {activeTab === "board" ? (
+                    <ProjectBoard projectId={selectedProject.id} boardLabels={projectTemplate?.board_labels} />
+                  ) : (
+                    <div className="bg-card/30 border border-border rounded-2xl overflow-hidden min-h-[500px] max-h-[800px] flex">
+                      {selectedProject.workspace_path ? (
+                        <FileBrowser workspacePath={selectedProject.workspace_path} />
+                      ) : (
+                        <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground p-8">
+                          <FolderOpen className="w-12 h-12 mb-4 opacity-20" />
+                          <p>No workspace path available for this project.</p>
+                          <p className="text-sm mt-2 opacity-60">
+                            Start execution or check project settings to generate a workspace.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Live Activity Feed */}

@@ -113,6 +113,7 @@ impl GatewayClient {
         let pending_clone = self.pending.clone();
         let connected_clone = self.connected.clone();
         let chat_collectors_clone = self.chat_collectors.clone();
+        let sender_clone = self.sender.clone();
 
         // Spawn writer task: forwards outgoing messages to WebSocket
         tokio::spawn(async move {
@@ -202,9 +203,18 @@ impl GatewayClient {
                     }
                 }
             }
-            // Connection closed
+            // Connection closed — clean up so the next call() gets an immediate
+            // "Not connected" error and triggers auto-reconnect instead of
+            // hanging until timeout.
             println!("[gateway] WebSocket connection closed");
             *connected_clone.lock().await = false;
+            // Clear sender so call_inner() returns "Not connected" immediately
+            *sender_clone.lock().await = None;
+            // Drain all in-flight requests so they don't hang waiting for responses
+            let mut pending = pending_clone.lock().await;
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err("WebSocket connection closed".to_string()));
+            }
         });
 
         // Send the connect handshake as the very first message
@@ -257,21 +267,82 @@ impl GatewayClient {
         }
     }
 
-    /// Try to reconnect using stored URL and token
+    /// Try to reconnect using stored URL and token.
+    /// Re-reads the auth token from env/config to pick up fresh credentials,
+    /// and retries a few times with short backoff since the Gateway may be mid-restart.
     async fn try_reconnect(&self) -> Result<(), String> {
         let url = self.url.lock().await.clone();
-        let token = self.token.lock().await.clone();
-        println!("[gateway] Auto-reconnecting to {}...", url);
-        self.connect(&url, token).await
+
+        // Always read the token fresh — it may have been updated, and the stored
+        // value might be None from an early auto-connect before the frontend
+        // passed the correct token via gateway_connect.
+        let token = Self::read_auth_token().or_else(|| {
+            // Fall back to the last stored token if env/config has nothing
+            // (block_on would deadlock, so we can't read `self.token` inside the
+            // async fn; we'll clone it in a separate step instead)
+            None
+        });
+        let token = match token {
+            Some(t) => Some(t),
+            None => self.token.lock().await.clone(),
+        };
+
+        println!("[gateway] Auto-reconnecting to {} (token: {})...", url,
+            if token.is_some() { "present" } else { "none" });
+
+        let delays_ms: &[u64] = &[0, 500, 1000, 2000];
+        let mut last_err = String::new();
+        for (attempt, &delay) in delays_ms.iter().enumerate() {
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            match self.connect(&url, token.clone()).await {
+                Ok(()) => {
+                    if attempt > 0 {
+                        println!("[gateway] Reconnected on attempt {}", attempt + 1);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("[gateway] Reconnect attempt {} failed: {}", attempt + 1, e);
+                    last_err = e;
+                }
+            }
+        }
+        Err(format!("Gateway reconnect failed: {}", last_err))
+    }
+
+    /// Read authentication token from environment variable or config file.
+    /// Same logic as gateway_connect but available as a static method.
+    fn read_auth_token() -> Option<String> {
+        // 1. Check OPENCLAW_GATEWAY_TOKEN env var (set by dev.sh)
+        if let Ok(env_token) = std::env::var("OPENCLAW_GATEWAY_TOKEN") {
+            if !env_token.is_empty() {
+                return Some(env_token);
+            }
+        }
+        // 2. Fall back to ~/.openclaw/openclaw.json config
+        let home = std::env::var("HOME").ok()?;
+        let config_path = format!("{}/.openclaw/openclaw.json", home);
+        let content = std::fs::read_to_string(config_path).ok()?;
+        let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+        config.get("gateway")
+            .and_then(|g| g.get("auth"))
+            .and_then(|a| a.get("token"))
+            .and_then(|t| t.as_str())
+            .map(String::from)
     }
 
     /// Send a request to the Gateway and wait for the response.
-    /// Auto-reconnects once if the channel is closed.
+    /// Auto-reconnects once if the connection was lost (e.g. Gateway restarted).
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         // First attempt
         match self.call_inner(method, params.clone()).await {
             Ok(val) => Ok(val),
-            Err(e) if e.contains("channel closed") || e.contains("Not connected") => {
+            Err(e) if e.contains("channel closed")
+                    || e.contains("Not connected")
+                    || e.contains("WebSocket connection closed") =>
+            {
                 // Connection dropped — try reconnecting once
                 println!("[gateway] Connection lost ({}), attempting reconnect...", e);
                 self.try_reconnect().await?;
@@ -390,25 +461,8 @@ pub async fn gateway_connect(
 ) -> Result<bool, String> {
     let gateway_url = url.unwrap_or_else(|| "ws://127.0.0.1:18789".to_string());
 
-    // Try to read token: env var first, then config file
-    let auth_token = token.or_else(|| {
-        // 1. Check OPENCLAW_GATEWAY_TOKEN env var (set by dev.sh)
-        if let Ok(env_token) = std::env::var("OPENCLAW_GATEWAY_TOKEN") {
-            if !env_token.is_empty() {
-                return Some(env_token);
-            }
-        }
-        // 2. Fall back to ~/.openclaw/openclaw.json config
-        let home = std::env::var("HOME").ok()?;
-        let config_path = format!("{}/.openclaw/openclaw.json", home);
-        let content = std::fs::read_to_string(config_path).ok()?;
-        let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-        config.get("gateway")
-            .and_then(|g| g.get("auth"))
-            .and_then(|a| a.get("token"))
-            .and_then(|t| t.as_str())
-            .map(String::from)
-    });
+    // Use explicitly provided token, or read from env/config
+    let auth_token = token.or_else(GatewayClient::read_auth_token);
 
     println!("Connecting to Gateway at: {} (token: {})", gateway_url, 
         if auth_token.is_some() { "present" } else { "none" });

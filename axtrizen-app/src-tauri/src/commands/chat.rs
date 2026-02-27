@@ -75,6 +75,7 @@ pub async fn chat_inject(
 // ==================== Local SQLite Chat Persistence ====================
 
 /// Save a chat message to the local SQLite database
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn save_chat_message(
     session_key: String,

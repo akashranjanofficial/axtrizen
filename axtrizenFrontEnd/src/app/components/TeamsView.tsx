@@ -13,9 +13,13 @@ import {
   Check,
   X as XIcon,
   AlertTriangle,
+  Hash,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { agentStore } from "../stores/agent-store";
+import { useState, useEffect, useRef } from "react";
+import { agentStore, type Agent } from "../stores/agent-store";
+import { ConfigTemplateManager } from "./teams/ConfigTemplateManager";
 import {
   getTeams,
   createTeam,
@@ -24,8 +28,15 @@ import {
   getTeamMembers,
   addTeamMember,
   removeTeamMember,
+  createAgentGroup,
+  getAgentGroups,
+  addAgentToGroup,
+  removeAgentFromGroup,
+  getGroupMembers,
+  deleteAgentGroup,
   type Team,
   type TeamMember,
+  type AgentGroup,
 } from "../tauri-api";
 
 export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: string) => void }) {
@@ -47,11 +58,26 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
   const [addingAgentId, setAddingAgentId] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
 
+  // Ref to always have current selectedTeam inside interval callbacks
+  const selectedTeamRef = useRef(selectedTeam);
+  useEffect(() => {
+    selectedTeamRef.current = selectedTeam;
+  }, [selectedTeam]);
+
   // Rename state
   const [isEditingName, setIsEditingName] = useState(false);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editManagerId, setEditManagerId] = useState("");
+
+  // Channels (Agent Groups) state
+  const [channels, setChannels] = useState<AgentGroup[]>([]);
+  const [expandedChannelId, setExpandedChannelId] = useState<string | null>(null);
+  const [channelMembers, setChannelMembers] = useState<string[]>([]);
+  const [isCreatingChannel, setIsCreatingChannel] = useState(false);
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelDesc, setNewChannelDesc] = useState("");
+  const [addingChannelAgentId, setAddingChannelAgentId] = useState("");
 
   // Delete confirmation modal state
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -68,8 +94,10 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
     try {
       const data = await getTeams();
       setTeams(data);
-      if (selectedTeam) {
-        const updated = data.find((t) => t.id === selectedTeam.id);
+      // Use ref to get current selectedTeam (avoids stale closure in interval)
+      const current = selectedTeamRef.current;
+      if (current) {
+        const updated = data.find((t) => t.id === current.id);
         setSelectedTeam(updated || null);
       }
     } catch (err) {
@@ -88,19 +116,53 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
     }
   };
 
+  // Fetch channels for a team
+  const fetchChannels = async (teamId: string) => {
+    try {
+      const data = await getAgentGroups(teamId);
+      setChannels(data);
+    } catch (err) {
+      console.error("Failed to fetch channels:", err);
+    }
+  };
+
+  // Fetch members of a specific channel
+  const fetchChannelMembers = async (channelId: string) => {
+    try {
+      const members = await getGroupMembers(channelId);
+      setChannelMembers(members);
+    } catch (err) {
+      console.error("Failed to fetch channel members:", err);
+    }
+  };
+
   useEffect(() => {
     fetchTeams();
     const int = setInterval(fetchTeams, 10000);
     return () => clearInterval(int);
   }, []);
 
+  // Only re-fetch members when the selected team's ID changes (not on every object reference change)
+  const selectedTeamId = selectedTeam?.id ?? null;
   useEffect(() => {
-    if (selectedTeam) {
-      fetchMembers(selectedTeam.id);
+    if (selectedTeamId) {
+      fetchMembers(selectedTeamId);
+      fetchChannels(selectedTeamId);
     } else {
       setTeamMembers([]);
+      setChannels([]);
     }
-  }, [selectedTeam]);
+    setExpandedChannelId(null);
+  }, [selectedTeamId]);
+
+  // Fetch channel members when expanding a channel
+  useEffect(() => {
+    if (expandedChannelId) {
+      fetchChannelMembers(expandedChannelId);
+    } else {
+      setChannelMembers([]);
+    }
+  }, [expandedChannelId]);
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,6 +261,57 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
       await fetchMembers(selectedTeam.id);
     } catch (err) {
       console.error("Failed to remove member:", err);
+    }
+  };
+
+  // Channel CRUD handlers
+  const handleCreateChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedTeam || !newChannelName.trim()) return;
+    try {
+      await createAgentGroup(
+        selectedTeam.id,
+        newChannelName.trim(),
+        newChannelDesc.trim() || undefined,
+      );
+      setNewChannelName("");
+      setNewChannelDesc("");
+      setIsCreatingChannel(false);
+      await fetchChannels(selectedTeam.id);
+    } catch (err) {
+      console.error("Failed to create channel:", err);
+    }
+  };
+
+  const handleDeleteChannel = async (channelId: string) => {
+    if (!selectedTeam) return;
+    try {
+      await deleteAgentGroup(channelId);
+      if (expandedChannelId === channelId) setExpandedChannelId(null);
+      await fetchChannels(selectedTeam.id);
+    } catch (err) {
+      console.error("Failed to delete channel:", err);
+    }
+  };
+
+  const handleAddToChannel = async () => {
+    if (!expandedChannelId || !addingChannelAgentId) return;
+    try {
+      await addAgentToGroup(expandedChannelId, addingChannelAgentId);
+      setAddingChannelAgentId("");
+      await fetchChannelMembers(expandedChannelId);
+    } catch (err) {
+      console.error("Failed to add agent to channel:", err);
+    }
+  };
+
+  const handleRemoveFromChannel = async (agentId: string) => {
+    if (!expandedChannelId) return;
+    try {
+      await removeAgentFromGroup(expandedChannelId, agentId);
+      await fetchChannelMembers(expandedChannelId);
+    } catch (err) {
+      console.error("Failed to remove from channel:", err);
     }
   };
 
@@ -309,6 +422,7 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
               Teams
             </h2>
             <button
+              data-testid="create-team-btn"
               onClick={() => setIsCreating(true)}
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-all shadow-lg shadow-primary/20"
             >
@@ -577,8 +691,8 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
                     <UserPlus className="w-4 h-4" /> Add
                   </button>
                 </div>
-                {addError && <p className="text-xs text-red-400 mt-2">{addError}</p>}
               </div>
+              {addError && <p className="text-xs text-red-400 mb-4 -mt-4 px-1">{addError}</p>}
 
               {/* Members Grid */}
               {teamMembers.length === 0 ? (
@@ -628,6 +742,181 @@ export function TeamsView({ onOpenGroupChat }: { onOpenGroupChat?: (teamId: stri
                   })}
                 </div>
               )}
+            </div>
+
+            {/* ── Channels (Agent Groups) Section ── */}
+            <div className="mt-8 bg-card/30 border border-border rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-medium flex items-center gap-2">
+                  <Hash className="w-5 h-5 text-primary" /> Channels ({channels.length})
+                </h3>
+                <button
+                  onClick={() => setIsCreatingChannel(!isCreatingChannel)}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-sm font-medium"
+                >
+                  <Plus className="w-4 h-4" /> New Channel
+                </button>
+              </div>
+
+              {/* Create Channel Form */}
+              {isCreatingChannel && (
+                <form
+                  onSubmit={handleCreateChannel}
+                  className="mb-6 p-4 bg-muted/30 border border-border rounded-xl space-y-3"
+                >
+                  <input
+                    type="text"
+                    required
+                    value={newChannelName}
+                    onChange={(e) => setNewChannelName(e.target.value)}
+                    placeholder="Channel name (e.g. frontend, backend, devops)"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                    autoFocus
+                  />
+                  <input
+                    type="text"
+                    value={newChannelDesc}
+                    onChange={(e) => setNewChannelDesc(e.target.value)}
+                    placeholder="Description (optional)"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:border-primary focus:outline-none"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={!newChannelName.trim()}
+                      className="px-4 py-1.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      Create
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsCreatingChannel(false)}
+                      className="px-4 py-1.5 text-muted-foreground hover:bg-muted rounded-lg text-sm"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Channel List */}
+              {channels.length === 0 && !isCreatingChannel ? (
+                <div className="text-center py-8 border border-dashed border-border rounded-xl text-muted-foreground text-sm">
+                  No channels yet. Create one to organize agent communication.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {channels.map((ch) => {
+                    const isExpanded = expandedChannelId === ch.id;
+                    // Agents in this team but not in this channel (for the add dropdown)
+                    const availableForChannel = teamMembers.filter(
+                      (m) => !channelMembers.includes(m.agent_id),
+                    );
+
+                    return (
+                      <div
+                        key={ch.id}
+                        className={`border rounded-xl transition-all ${
+                          isExpanded ? "border-primary/30 bg-primary/5" : "border-border bg-card/50"
+                        }`}
+                      >
+                        {/* Channel Header */}
+                        <button
+                          onClick={() => setExpandedChannelId(isExpanded ? null : ch.id)}
+                          className="w-full flex items-center gap-3 p-3 text-left"
+                        >
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-primary" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                          )}
+                          <Hash className="w-4 h-4 text-primary/70" />
+                          <span className="text-sm font-medium flex-1">{ch.name}</span>
+                          {ch.description && (
+                            <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                              {ch.description}
+                            </span>
+                          )}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteChannel(ch.id);
+                            }}
+                            className="p-1 text-muted-foreground hover:text-red-500 hover:bg-red-500/10 rounded transition-colors opacity-0 group-hover:opacity-100"
+                            title="Delete channel"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </button>
+
+                        {/* Expanded: Members + Add */}
+                        {isExpanded && (
+                          <div className="px-4 pb-4 border-t border-border/50 pt-3">
+                            <div className="flex items-center gap-2 mb-3">
+                              <select
+                                value={addingChannelAgentId}
+                                onChange={(e) => setAddingChannelAgentId(e.target.value)}
+                                className="flex-1 rounded-lg border border-border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                              >
+                                <option value="">Add agent to channel...</option>
+                                {availableForChannel.map((m) => {
+                                  const a = getAgentDetails(m.agent_id);
+                                  return a ? (
+                                    <option key={a.id} value={a.id}>
+                                      {a.name} ({a.role})
+                                    </option>
+                                  ) : null;
+                                })}
+                              </select>
+                              <button
+                                onClick={handleAddToChannel}
+                                disabled={!addingChannelAgentId}
+                                className="flex items-center gap-1 px-3 py-1.5 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-sm font-medium disabled:opacity-50"
+                              >
+                                <UserPlus className="w-3.5 h-3.5" /> Add
+                              </button>
+                            </div>
+
+                            {channelMembers.length === 0 ? (
+                              <p className="text-xs text-muted-foreground text-center py-3">
+                                No agents in this channel yet.
+                              </p>
+                            ) : (
+                              <div className="flex flex-wrap gap-2">
+                                {channelMembers.map((agentId) => {
+                                  const agent = getAgentDetails(agentId);
+                                  if (!agent) return null;
+                                  return (
+                                    <div
+                                      key={agentId}
+                                      className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-1.5 text-sm group"
+                                    >
+                                      <span>{agent.avatar || "🤖"}</span>
+                                      <span className="font-medium">{agent.name}</span>
+                                      <button
+                                        onClick={() => handleRemoveFromChannel(agentId)}
+                                        className="text-muted-foreground hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="Remove from channel"
+                                      >
+                                        <XIcon className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* ── Config Templates Section ── */}
+            <div className="mt-6">
+              <ConfigTemplateManager />
             </div>
           </div>
         ) : (

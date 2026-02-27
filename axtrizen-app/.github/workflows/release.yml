@@ -1,0 +1,173 @@
+name: Axtrizen Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        id: create
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Axtrizen AI ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+
+  build-tauri:
+    name: Build (${{ matrix.label }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS-arm64
+            target: aarch64-apple-darwin
+          - os: macos-13
+            label: macOS-x64
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            label: Linux-x64
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            label: Windows-x64
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: axtrizen-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: axtrizen-app/src-tauri
+
+      # Linux system deps
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      # Frontend
+      - name: Install frontend dependencies
+        working-directory: axtrizenFrontEnd
+        run: npm ci
+
+      # Tauri CLI
+      - name: Install Tauri CLI
+        run: npm ci
+
+      # Run tests before building release
+      - name: Rust tests
+        working-directory: axtrizen-app/src-tauri
+        run: cargo test --all-features
+
+      - name: Frontend tests
+        working-directory: axtrizenFrontEnd
+        run: npx vitest run
+
+      # Release build
+      - name: Tauri build (release)
+        run: npx tauri build --target ${{ matrix.target }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing (optional)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # Upload platform bundles to the release
+      - name: Upload macOS artifacts
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+
+      - name: Upload Windows artifacts
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+
+      - name: Upload Linux artifacts
+        if: runner.os == 'Linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.tar.gz
+            axtrizen-app/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.tar.gz.sig
+
+  # Publish the draft release after all builds succeed
+  publish-release:
+    name: Publish Release
+    needs: [create-release, build-tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false
+            });

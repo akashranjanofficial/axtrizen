@@ -51,12 +51,20 @@ For Rust backend changes (`src-tauri/`), you DO need to restart `./dev.sh`.
 ## Automated Tests
 
 ```bash
-# Unit tests (vitest)
+# Frontend unit tests (vitest) — 907 tests, 38 files
 cd axtrizenFrontEnd && npx vitest run
+
+# Rust backend tests — 437 tests
+cd axtrizen-app/src-tauri && cargo test
+
+# Gateway config-reload tests — 11 tests
+cd openclaw-core && npx vitest run src/gateway/config-reload.test.ts
 
 # Build check
 cd axtrizenFrontEnd && npx vite build --logLevel error
 ```
+
+**Total test count: 1,355** (437 Rust + 907 Frontend + 11 Gateway)
 
 These can run outside the Tauri app since they don't require native APIs.
 

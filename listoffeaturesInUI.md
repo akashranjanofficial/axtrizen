@@ -31,21 +31,24 @@
 
 | Feature            | Status  | Details                                 |
 | ------------------ | ------- | --------------------------------------- |
-| Create Agent       | ✅ Live | Name + role → gateway `agents.create`   |
-| Agent List         | ✅ Live | Real agents from gateway, auto-syncs    |
-| Agent Settings     | ✅ Live | View/edit SOUL.md, IDENTITY.md, etc.    |
-| Delete Agent       | ✅ Live | Removes from gateway + optional files   |
-| Agent Status       | ✅ Live | Idle/Active/Error from `agentStore`     |
-| Agent Emoji/Avatar | ✅ Live | From gateway identity data, fallback 🤖 |
+| Create Agent (Wizard) | ✅ Live | 4-step wizard: Identity → Skills → Capabilities → Review |
+| Create Agent Config   | ✅ Live | Full config: skills, bundles, permissions, security level |
+| Skill Recommendations | ✅ Live | AI-powered skill suggestions based on agent role          |
+| Agent Templates       | ✅ Live | Save/load reusable agent configurations                  |
+| Agent List            | ✅ Live | Real agents from gateway, auto-syncs                     |
+| Agent Settings        | ✅ Live | View/edit SOUL.md, IDENTITY.md, etc.                     |
+| Delete Agent          | ✅ Live | Gateway delete + config-reload safe (no restart)         |
+| Agent Status          | ✅ Live | Idle/Active/Error from `agentStore`                      |
+| Agent Emoji/Avatar    | ✅ Live | From gateway identity data, fallback 🤖                  |
 
 ### 💬 Chat Interface
 
 | Feature                | Status  | Details                                |
 | ---------------------- | ------- | -------------------------------------- |
-| Agent list sidebar     | ✅ Live | Real agents with status badges + emoji |
-| Send messages          | ✅ Live | Gateway `chat.send` RPC                |
-| Receive responses      | ✅ Live | From gateway                           |
-| Chat history           | ✅ Live | Gateway transcripts, survives restarts |
+| Agent list sidebar     | ✅ Live | Real agents, live-synced from agentStore |
+| Send messages          | ✅ Live | Gateway `chat.send` RPC                  |
+| Receive responses      | ✅ Live | From gateway                             |
+| Chat history           | ✅ Live | Gateway transcripts, survives restarts   |
 | Markdown rendering     | ✅ Done | `react-markdown` + custom CSS          |
 | Sanitize protocol tags | ✅ Done | Strips `</final>`, `</error>`, etc.    |
 | Filter tool output     | ✅ Done | Hides raw JSON from display            |
@@ -109,8 +112,10 @@
 
 | Feature             | Status     | Details                        |
 | ------------------- | ---------- | ------------------------------ |
-| Gateway WebSocket   | ✅ Live    | Protocol v3, auto-reconnect    |
-| Auth token          | ✅ Live    | Env var → config file fallback |
-| All CRUD operations | ✅ Live    | agents, sessions, settings     |
-| Health/Usage APIs   | ✅ Live    | Memory, uptime, version, cost  |
-| Mock data           | ✅ Removed | `mockData.ts` deleted          |
+| Gateway WebSocket      | ✅ Live    | Protocol v3, auto-reconnect + fresh token       |
+| Auth token             | ✅ Live    | Env var → config file fallback                  |
+| WebSocket reconnection | ✅ Live    | Auto-reconnect with backoff [0, 500, 1k, 2k]ms |
+| All CRUD operations    | ✅ Live    | agents, sessions, settings                      |
+| Health/Usage APIs      | ✅ Live    | Memory, uptime, version, cost                   |
+| Config reload safety   | ✅ Live    | `meta.*` changes = no-op (no Gateway restart)   |
+| Mock data              | ✅ Removed | `mockData.ts` deleted                           |

@@ -6,6 +6,10 @@ import {
   MessageSquare,
   Settings,
   ChevronLeft,
+  Radar,
+  Mic,
+  BarChart3,
+  Rocket,
 } from "lucide-react";
 
 interface MenuItem {
@@ -16,10 +20,14 @@ interface MenuItem {
 
 const menuItems: MenuItem[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "mission", label: "Mission Control", icon: Radar },
   { id: "agents", label: "Agents", icon: Bot },
   { icon: Users, label: "Teams", id: "teams" },
   { id: "projects", label: "Projects", icon: FolderOpen },
   { id: "chat", label: "Chat", icon: MessageSquare },
+  { id: "voice", label: "Voice", icon: Mic },
+  { id: "usage", label: "Usage", icon: BarChart3 },
+  { id: "release", label: "Release", icon: Rocket },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -108,18 +116,8 @@ export function Sidebar({ activeMenu, onMenuChange, isCollapsed, onCollapseToggl
         </button>
       </div>
 
-      {/* Stats Footer */}
-      {!isCollapsed && (
-        <div className="absolute bottom-24 left-0 right-0 mx-4 rounded-xl border border-border bg-card p-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-muted-foreground">Storage Used</span>
-            <span className="text-xs text-foreground">2.4 / 10 GB</span>
-          </div>
-          <div className="h-2 rounded-full bg-muted overflow-hidden">
-            <div className="h-full w-[24%] rounded-full bg-primary" />
-          </div>
-        </div>
-      )}
+      {/* Stats footer removed — was displaying hard-coded placeholder data */}
+
     </aside>
   );
 }

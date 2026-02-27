@@ -52,3 +52,7 @@ Object.defineProperty(window, "__TAURI__", {
     invoke: invokeMock,
   },
 });
+
+// Polyfill JSDOM missing DOM methods used by components
+Element.prototype.scrollIntoView = Element.prototype.scrollIntoView || function () {};
+Element.prototype.scrollTo = Element.prototype.scrollTo || function () {};

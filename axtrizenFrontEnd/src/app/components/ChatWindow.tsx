@@ -16,12 +16,14 @@ import {
 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
+import { markdownComponents } from "./CodeBlockActions";
+import { GlobalChatSearch } from "./GlobalChatSearch";
 import {
-  getGatewayClient,
   type ChatMessage,
   type AgentInfo,
   type ConnectionStatus,
   type GatewayEvent,
+  getGatewayClient,
 } from "../gateway-client";
 import {
   loadAgentMemory,
@@ -37,13 +39,15 @@ import {
   buildManagerReviewPrompt,
 } from "../services/discussion-engine";
 import { getAdapter, buildSessionKey } from "../services/gateway-adapter";
+import { ToolCard, ProductReadyCard } from "./ToolCard";
+import { openInFileManager, createWorkspaceZip } from "../services/workspace-manager";
+import { ActivityBar, useAgentActivity } from "./AgentActivityIndicator";
 import { chatStore } from "../stores/chat-store";
 import { agentStore } from "../stores/agent-store";
 import {
   getTeams,
   getTeamMembers,
   deleteTeam as deleteTauriTeam,
-  deleteAgent as deleteTauriAgent,
   type Team,
   type TeamMember,
 } from "../tauri-api";
@@ -291,6 +295,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   const [isAgentThinking, setIsAgentThinking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agentStatuses, setAgentStatuses] = useState<Map<string, string>>(new Map());
+  const { agentList: activeAgents, handleEvent: handleActivityEvent } = useAgentActivity();
 
   // Team group chat state
   const [teams, setTeams] = useState<Team[]>([]);
@@ -309,6 +314,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     }
   });
   const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(new Map());
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [lastMessages, setLastMessages] = useState<Map<string, { text: string; time: number }>>(
     new Map(),
   );
@@ -331,6 +337,15 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
       messageStoreRef.current.set(`team:${selectedTeam.id}`, messages);
     }
   }, [selectedAgent, selectedTeam, messages]);
+
+  // Continuously sync messages to the ref cache so it's always up-to-date
+  useEffect(() => {
+    if (selectedAgent && !selectedTeam) {
+      messageStoreRef.current.set(`dm:${selectedAgent.id}`, messages);
+    } else if (selectedTeam) {
+      messageStoreRef.current.set(`team:${selectedTeam.id}`, messages);
+    }
+  }, [messages, selectedAgent, selectedTeam]);
 
   // Refs for websocket event handlers to access current state
   const selectedAgentRef = useRef(selectedAgent);
@@ -373,7 +388,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     }
     try {
       if (type === "agent") {
-        await deleteTauriAgent(id);
+        await agentStore.removeAgent(id);
         setAgents((prev) => prev.filter((a) => a.id !== id));
         // Clear all cached state for this chat
         messageStoreRef.current.delete(id);
@@ -386,8 +401,6 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
           setSelectedAgent(null);
           setMessages([]);
         }
-        // Also sync agent store
-        agentStore.sync();
       } else {
         await deleteTauriTeam(id);
         setTeams((prev) => prev.filter((t) => t.id !== id));
@@ -556,8 +569,16 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             if (!payload.sessionKey.toLowerCase().includes(teamSuffix)) {
               return;
             }
-          } else if (payload.sessionKey !== expectedSessionKey) {
-            return;
+          } else {
+            // DM context: reject any session key that doesn't match exactly,
+            // AND additionally reject orchestrator-scoped keys (`:orch:`)
+            // as a defence-in-depth against the chat-leak bug.
+            if (
+              payload.sessionKey !== expectedSessionKey ||
+              payload.sessionKey.includes(":orch:")
+            ) {
+              return;
+            }
           }
         }
 
@@ -634,17 +655,34 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     };
   }, []);
 
-  // Subscribe to agentStore for live status updates
+  // Subscribe to agentStore for live status updates AND agent list sync
   useEffect(() => {
-    const updateStatuses = () => {
+    const syncFromStore = () => {
+      // Update status map
       const statusMap = new Map<string, string>();
       for (const agent of agentStore.getAgents()) {
         statusMap.set(agent.id, agent.status);
       }
       setAgentStatuses(statusMap);
+
+      // Sync agent list — when agents are created/deleted in AgentsView,
+      // the chat sidebar picks up the change immediately via agentStore.
+      const storeAgents = agentStore.getAgents();
+      const mapped: AgentInfo[] = storeAgents.map((a) => ({ id: a.id, name: a.name }));
+      if (mapped.length > 0) {
+        setAgents((prev) => {
+          // Only update if the set of agent IDs actually changed
+          const prevIds = new Set(prev.map((a) => a.id));
+          const nextIds = new Set(mapped.map((a) => a.id));
+          if (prevIds.size === nextIds.size && [...prevIds].every((id) => nextIds.has(id))) {
+            return prev; // No change
+          }
+          return mapped;
+        });
+      }
     };
-    updateStatuses();
-    const unsub = agentStore.subscribe(updateStatuses);
+    syncFromStore();
+    const unsub = agentStore.subscribe(syncFromStore);
     return unsub;
   }, []);
 
@@ -712,12 +750,19 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         setMessages(parsed);
         messageStoreRef.current.set(`dm:${agentId}`, parsed);
       } else {
-        setMessages([]);
+        // Gateway returned empty — don't wipe existing messages
+        const cached = messageStoreRef.current.get(`dm:${agentId}`);
+        if (cached && cached.length > 0) {
+          setMessages(cached);
+        }
       }
     } catch (err) {
       console.warn("Failed to load chat history:", err);
-      // Fall back to in-memory store
-      setMessages(messageStoreRef.current.get(`dm:${agentId}`) || []);
+      // On error, keep current messages
+      const cached = messageStoreRef.current.get(`dm:${agentId}`);
+      if (cached && cached.length > 0) {
+        setMessages(cached);
+      }
     }
   }, []);
 
@@ -782,11 +827,21 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         setMessages(parsed);
         messageStoreRef.current.set(`team:${teamId}`, parsed);
       } else {
-        setMessages([]);
+        // Gateway returned empty — DON'T wipe existing messages
+        // (orchestration events are generated client-side and won't be in gateway history)
+        const cached = messageStoreRef.current.get(`team:${teamId}`);
+        if (cached && cached.length > 0) {
+          setMessages(cached);
+        }
+        // else: keep current messages state as-is (don't setMessages([]))
       }
     } catch (err) {
       console.warn("Failed to load group chat history:", err);
-      setMessages(messageStoreRef.current.get(`team:${teamId}`) || []);
+      // On error, keep current messages — don't reset
+      const cached = messageStoreRef.current.get(`team:${teamId}`);
+      if (cached && cached.length > 0) {
+        setMessages(cached);
+      }
     }
   }, []);
 
@@ -970,6 +1025,11 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
           console.log(`[chatwindow:orch] event=${event.type}`, event);
           switch (event.type) {
             case "agent_thinking": {
+              handleActivityEvent({
+                type: "agent_thinking",
+                agentId: event.agentId,
+                agentName: event.agentName,
+              });
               const msgId = `orch-${Date.now()}-${msgCounter++}`;
               msgIdMap.set(event.agentId, msgId);
               const pos = event.position ? ` [${event.position}]` : "";
@@ -1032,6 +1092,15 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   },
                 ];
               });
+
+              // Auto-notify: send error to Slack/Discord (non-blocking)
+              import("../services/slack-discord-integration")
+                .then(({ integrations, buildAgentNotification }) =>
+                  integrations.notify(
+                    buildAgentNotification(event.agentName, "error", event.error),
+                  ),
+                )
+                .catch(() => {});
               break;
             }
             case "summary_thinking": {
@@ -1138,7 +1207,131 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               break;
             }
             case "complete":
+              handleActivityEvent({ type: "complete" });
+
+              // CI/CD Test Gate: auto-run tests after orchestration (non-blocking)
+              if (selectedTeam || selectedAgent) {
+                import("../services/ci-trigger")
+                  .then(async ({ runTestGate }) => {
+                    // Check if any product_ready event was emitted with a workspace path
+                    const latestMsgs = document.querySelectorAll(
+                      '[data-testid="messages-container"] *',
+                    );
+                    const productMsg = Array.from(latestMsgs).find((el) =>
+                      el.textContent?.includes("__PRODUCT_READY__"),
+                    );
+                    if (productMsg) {
+                      const match = productMsg.textContent?.match(/__PRODUCT_READY__\|([^|]+)\|/);
+                      if (match?.[1]) {
+                        const result = await runTestGate(match[1]);
+                        setMessages((prev) => [
+                          ...prev,
+                          {
+                            id: `test-gate-${Date.now()}`,
+                            role: "assistant" as const,
+                            content: `🧪 **Test Gate**: ${result.summary}`,
+                            timestamp: Date.now(),
+                            status: result.passed ? ("sent" as const) : ("error" as const),
+                          },
+                        ]);
+                      }
+                    }
+                  })
+                  .catch(() => {});
+              }
+
+              // Auto-notify: send completion summary to Slack/Discord (non-blocking)
+              import("../services/slack-discord-integration")
+                .then(({ integrations, buildAgentNotification }) =>
+                  integrations.notify(
+                    buildAgentNotification("Team", "task_complete", body.slice(0, 200)),
+                  ),
+                )
+                .catch(() => {});
               break;
+            case "tool_start": {
+              handleActivityEvent({
+                type: "tool_start",
+                agentId: event.agentId,
+                agentName: event.agentName,
+                tool: event.tool,
+              });
+              const msgId = `tool-${Date.now()}-${msgCounter++}`;
+              msgIdMap.set(`tool-${event.agentId}-active`, msgId);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `__TOOL_CARD_START__|${event.agentName}|${event.tool}|${event.input}`,
+                  timestamp: Date.now(),
+                  status: "sending" as const,
+                  senderName: event.agentName,
+                },
+              ]);
+              break;
+            }
+            case "tool_result": {
+              handleActivityEvent({
+                type: "tool_result",
+                agentId: event.agentId,
+                agentName: event.agentName,
+              });
+              const activeId = msgIdMap.get(`tool-${event.agentId}-active`);
+              if (activeId) {
+                const resultData = event.error
+                  ? `__TOOL_CARD_RESULT__|${event.agentName}|${event.tool}||${event.output}|${event.error}`
+                  : `__TOOL_CARD_RESULT__|${event.agentName}|${event.tool}|${event.output}|`;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === activeId ? { ...m, content: resultData, status: "sent" as const } : m,
+                  ),
+                );
+                msgIdMap.delete(`tool-${event.agentId}-active`);
+              }
+              break;
+            }
+            case "text_delta": {
+              // Append to the active agent's message
+              const deltaKey = `delta-${event.agentId}`;
+              const existingId = msgIdMap.get(deltaKey);
+              if (existingId) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === existingId ? { ...m, content: m.content + event.text } : m,
+                  ),
+                );
+              } else {
+                const msgId = `stream-${Date.now()}-${msgCounter++}`;
+                msgIdMap.set(deltaKey, msgId);
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: msgId,
+                    role: "assistant" as const,
+                    content: `**@${event.agentName}**: ${event.text}`,
+                    timestamp: Date.now(),
+                    status: "sending" as const,
+                    senderName: event.agentName,
+                  },
+                ]);
+              }
+              break;
+            }
+            case "product_ready": {
+              const msgId = `product-${Date.now()}-${msgCounter++}`;
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msgId,
+                  role: "assistant" as const,
+                  content: `__PRODUCT_READY__|${event.workspacePath}|${event.summary.slice(0, 500)}`,
+                  timestamp: Date.now(),
+                  status: "sent" as const,
+                },
+              ]);
+              break;
+            }
             case "round_start": {
               const msgId = `round-${Date.now()}-${msgCounter++}`;
               setMessages((prev) => [
@@ -1254,6 +1447,26 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
     } finally {
       setIsAgentThinking(false);
       inputRef.current?.focus();
+
+      // Auto-memorize: persist this exchange to memU long-term memory (non-blocking)
+      const memAgentId = selectedAgent?.id ?? selectedTeam?.id;
+      if (memAgentId) {
+        setMessages((currentMsgs) => {
+          // Grab the last few messages (user + assistant responses)
+          const recent = currentMsgs.slice(-4).filter((m) => m.status !== "error");
+          if (recent.length > 0) {
+            import("../services/agent-memory")
+              .then(({ autoMemorizeConversation }) =>
+                autoMemorizeConversation(
+                  memAgentId,
+                  recent.map((m) => ({ role: m.role, content: m.content })),
+                ),
+              )
+              .catch(() => {});
+          }
+          return currentMsgs; // don't mutate state
+        });
+      }
     }
   };
 
@@ -1418,7 +1631,28 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
   };
 
   return (
-    <div className="h-[calc(100vh-73px)] flex overflow-hidden">
+    <div
+      data-testid="chat-window"
+      className="h-[calc(100vh-73px)] flex overflow-hidden relative"
+      onKeyDown={(e) => {
+        // Cmd+Shift+F or Ctrl+Shift+F → open global search
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "f") {
+          e.preventDefault();
+          setGlobalSearchOpen(true);
+        }
+      }}
+      tabIndex={-1}
+    >
+      {/* Global Chat Search overlay */}
+      <GlobalChatSearch
+        isOpen={globalSearchOpen}
+        onClose={() => setGlobalSearchOpen(false)}
+        onNavigate={(sessionKey, _messageId) => {
+          setGlobalSearchOpen(false);
+          // TODO: navigate to conversation by sessionKey
+        }}
+      />
+
       {/* Left Sidebar — Chats */}
       <div className="w-72 border-r border-border bg-card/50 backdrop-blur-xl flex flex-col">
         <div className="p-4 border-b border-border">
@@ -1444,6 +1678,16 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
               className="w-full rounded-lg border border-border bg-muted py-2 pl-9 pr-3 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none transition-all"
             />
           </div>
+          <button
+            type="button"
+            onClick={() => setGlobalSearchOpen(true)}
+            className="w-full mt-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-md hover:bg-muted/60 transition-colors"
+            data-testid="open-global-search"
+          >
+            <Search className="h-3 w-3" />
+            Search all messages…{" "}
+            <kbd className="ml-auto text-[10px] px-1 py-0.5 rounded border border-border">⌘⇧F</kbd>
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-3">
@@ -1792,7 +2036,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
         )}
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        <div data-testid="messages-container" className="flex-1 overflow-y-auto p-6 space-y-4">
           {messages.length === 0 && (selectedAgent || selectedTeam) && (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 mb-4">
@@ -1827,6 +2071,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
             </div>
           )}
 
+          {/* Agent Activity Bar — shows live status during orchestration */}
+          {activeAgents.length > 0 && <ActivityBar agents={activeAgents} />}
+
           {messages.map((msg) => {
             const isUser = msg.role === "user";
             const isGroupChat = !!selectedTeam;
@@ -1855,7 +2102,7 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                 <div key={msg.id} className="flex justify-center my-2">
                   <div className="max-w-[85%] rounded-xl px-4 py-2.5 bg-muted/50 border border-border/50 text-center">
                     <div className="chat-markdown text-xs text-muted-foreground leading-relaxed">
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      <ReactMarkdown components={markdownComponents}>{msg.content}</ReactMarkdown>
                     </div>
                     <p className="text-[10px] text-muted-foreground/50 mt-1">
                       {new Date(msg.timestamp).toLocaleTimeString([], {
@@ -1875,7 +2122,9 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   <div className="max-w-[75%] rounded-2xl rounded-br-md px-4 py-3 bg-primary text-primary-foreground">
                     <div className="chat-markdown text-sm leading-relaxed">
                       {msg.content ? (
-                        <ReactMarkdown>{sanitizeMessageContent(msg.content)}</ReactMarkdown>
+                        <ReactMarkdown components={markdownComponents}>
+                          {sanitizeMessageContent(msg.content)}
+                        </ReactMarkdown>
                       ) : msg.status === "sending" ? null : (
                         <p>...</p>
                       )}
@@ -1927,8 +2176,79 @@ export function ChatWindow({ chatTarget }: ChatWindowProps) {
                   </div>
                   {/* Content */}
                   <div className="chat-markdown text-sm leading-relaxed text-foreground">
-                    {msg.content ? (
-                      <ReactMarkdown>{sanitizeMessageContent(msg.content)}</ReactMarkdown>
+                    {msg.content?.startsWith("__TOOL_CARD_START__") ? (
+                      (() => {
+                        const parts = msg.content.split("|");
+                        return (
+                          <ToolCard
+                            agentName={parts[1] || "Agent"}
+                            tool={parts[2] || "unknown"}
+                            input={parts[3] || ""}
+                            isActive={msg.status === "sending"}
+                          />
+                        );
+                      })()
+                    ) : msg.content?.startsWith("__TOOL_CARD_RESULT__") ? (
+                      (() => {
+                        const parts = msg.content.split("|");
+                        return (
+                          <ToolCard
+                            agentName={parts[1] || "Agent"}
+                            tool={parts[2] || "unknown"}
+                            input=""
+                            output={parts[3] || ""}
+                            error={parts[4] || undefined}
+                          />
+                        );
+                      })()
+                    ) : msg.content?.startsWith("__PRODUCT_READY__") ? (
+                      (() => {
+                        const parts = msg.content.split("|");
+                        const wsPath = parts[1] || "";
+                        const wsSummary = parts[2] || "";
+                        return (
+                          <ProductReadyCard
+                            workspacePath={wsPath}
+                            summary={wsSummary}
+                            onOpenFolder={() => openInFileManager(wsPath)}
+                            onDownload={async () => {
+                              try {
+                                const zipPath = await createWorkspaceZip(wsPath);
+                                await openInFileManager(zipPath);
+                              } catch (err) {
+                                console.error("[chat] Download failed:", err);
+                              }
+                            }}
+                            onApprove={() => {
+                              console.log("[chat] Project approved:", wsPath);
+                            }}
+                            onRequestChanges={(fb) => {
+                              // Inject feedback as a new user message and re-trigger
+                              const feedbackMsg = `🔄 **Feedback:** ${fb}`;
+                              setMessages((prev) => [
+                                ...prev,
+                                {
+                                  id: `feedback-${Date.now()}`,
+                                  role: "user" as const,
+                                  content: feedbackMsg,
+                                  timestamp: Date.now(),
+                                  status: "sent" as const,
+                                },
+                              ]);
+                              // Re-send to the chat by setting input and sending
+                              setMessageInput(fb);
+                              setTimeout(() => handleSendMessage(), 50);
+                            }}
+                            onRun={(cmd) => {
+                              console.log("[chat] Run command:", cmd, "in", wsPath);
+                            }}
+                          />
+                        );
+                      })()
+                    ) : msg.content ? (
+                      <ReactMarkdown components={markdownComponents}>
+                        {sanitizeMessageContent(msg.content)}
+                      </ReactMarkdown>
                     ) : msg.status === "sending" ? null : (
                       <p>...</p>
                     )}

@@ -19,13 +19,14 @@ import {
   type SessionInfo,
   type ConnectionStatus,
   type GatewayEvent,
+  type StreamDelta,
 } from "../gateway-client";
 
 // ── Adapter Types ──────────────────────────────────────────────────────
 // These are Axtrizen's own types, decoupled from OpenClaw's internal types.
 // If OpenClaw renames fields, we map them here.
 
-export type { ChatMessage, AgentInfo, SessionInfo, ConnectionStatus, GatewayEvent };
+export type { ChatMessage, AgentInfo, SessionInfo, ConnectionStatus, GatewayEvent, StreamDelta };
 
 /** Structured agent response from a message send */
 export type AgentResponse = {
@@ -78,6 +79,14 @@ export interface GatewayAdapter {
   // ── Agent Operations ──
   /** Send a message to an agent and wait for the full reply */
   sendMessage(message: string, agentId: string, sessionKey: string): Promise<AgentResponse>;
+
+  /** Send a message with streaming — fires onDelta for text chunks and tool events */
+  sendMessageStreaming(
+    message: string,
+    agentId: string,
+    sessionKey: string,
+    onDelta: (delta: StreamDelta) => void,
+  ): Promise<AgentResponse>;
 
   /** List all configured agents */
   listAgents(): Promise<AgentList>;
@@ -150,6 +159,22 @@ export class OpenClawAdapter implements GatewayAdapter {
   async sendMessage(message: string, agentId: string, sessionKey: string): Promise<AgentResponse> {
     const raw = await this.client.sendAgentMessage(message, agentId, sessionKey);
     // Normalize the response into our clean type
+    return {
+      runId: raw.runId,
+      status: raw.status,
+      summary: raw.summary,
+      payloads: raw.result?.payloads ?? [],
+      meta: raw.result?.meta,
+    };
+  }
+
+  async sendMessageStreaming(
+    message: string,
+    agentId: string,
+    sessionKey: string,
+    onDelta: (delta: StreamDelta) => void,
+  ): Promise<AgentResponse> {
+    const raw = await this.client.sendAgentMessageStreaming(message, agentId, sessionKey, onDelta);
     return {
       runId: raw.runId,
       status: raw.status,

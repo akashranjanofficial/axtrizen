@@ -49,6 +49,21 @@ type PendingRequest = {
   expectFinal: boolean;
 };
 
+/** Streaming delta event — text chunks and tool use events */
+export type StreamDelta = {
+  runId: string;
+  sessionKey?: string;
+} & (
+  | { type: "text_delta"; text: string }
+  | { type: "tool_start"; toolName: string; toolInput: string }
+  | { type: "tool_result"; toolName: string; output: string; error?: string }
+  | { type: "thinking"; text: string }
+  | { type: "started" }
+  | { type: "error"; message: string }
+);
+
+type StreamCallback = (delta: StreamDelta) => void;
+
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
 // ── Client ─────────────────────────────────────────────────────────────
@@ -56,6 +71,7 @@ export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "er
 export class OpenClawGatewayClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  private streamCallbacks = new Map<string, StreamCallback>();
   private idCounter = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = 1000;
@@ -265,6 +281,12 @@ export class OpenClawGatewayClient {
           }
           return;
         }
+
+        // ── Chat streaming events — route to per-run callbacks ──
+        if (parsed.event === "chat") {
+          this.handleChatEvent(parsed.payload);
+        }
+
         this.onEvent?.(parsed as GatewayEvent);
         return;
       }
@@ -279,8 +301,17 @@ export class OpenClawGatewayClient {
         // If expectFinal and status is "accepted", keep waiting
         const status = parsed.payload?.status;
         if (pending.expectFinal && status === "accepted") {
+          // Route "accepted" as a started event to stream callback
+          const runId = parsed.payload?.runId || parsed.id;
+          const cb = this.streamCallbacks.get(parsed.id);
+          if (cb && status === "accepted") {
+            cb({ runId, type: "started" });
+          }
           return;
         }
+
+        // Clean up stream callback when done
+        this.streamCallbacks.delete(parsed.id);
 
         this.pending.delete(parsed.id);
         if (parsed.ok) {
@@ -291,6 +322,87 @@ export class OpenClawGatewayClient {
       }
     } catch {
       // parse error, ignore
+    }
+  }
+
+  /**
+   * Parse chat streaming events and route to the appropriate run callback.
+   * OpenClaw sends: { state: "delta"|"started"|"final"|"error", runId, ... }
+   */
+  private handleChatEvent(payload: Record<string, unknown> | undefined) {
+    if (!payload) return;
+
+    const runId = (payload.runId as string) || "";
+    const state = payload.state as string;
+
+    // Find the stream callback by checking all registered run IDs
+    // The runId in events may differ from the request ID, so we try matching
+    let cb: StreamCallback | undefined;
+    for (const [, callback] of this.streamCallbacks) {
+      cb = callback;
+      break; // For now, route to the first (most recent) callback
+    }
+    if (!cb) return;
+
+    if (state === "delta") {
+      const delta = payload.delta as Record<string, unknown> | undefined;
+      const message = payload.message as Record<string, unknown> | undefined;
+
+      // Text delta
+      const text = (delta?.text as string) || "";
+      if (text) {
+        cb({ runId, type: "text_delta", text });
+      }
+
+      // Tool use events from message content blocks
+      const content = (message?.content ?? delta?.content) as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "tool_use") {
+            cb({
+              runId,
+              type: "tool_start",
+              toolName: (block.name as string) || "unknown",
+              toolInput:
+                typeof block.input === "string"
+                  ? block.input
+                  : JSON.stringify(block.input ?? {}, null, 2),
+            });
+          }
+          if (block.type === "tool_result") {
+            const resultContent = block.content as string | Array<{ text?: string }> | undefined;
+            const output =
+              typeof resultContent === "string"
+                ? resultContent
+                : Array.isArray(resultContent)
+                  ? resultContent.map((c) => c.text || "").join("\n")
+                  : JSON.stringify(block);
+            cb({
+              runId,
+              type: "tool_result",
+              toolName: (block.name as string) || (block.tool_use_id as string) || "unknown",
+              output,
+              error: block.is_error ? output : undefined,
+            });
+          }
+        }
+      }
+
+      // Thinking delta
+      const thinking = (delta?.thinking as string) || "";
+      if (thinking) {
+        cb({ runId, type: "thinking", text: thinking });
+      }
+    }
+
+    if (state === "error") {
+      cb({
+        runId,
+        type: "error",
+        message: (payload.errorMessage as string) || "Unknown error",
+      });
     }
   }
 
@@ -365,6 +477,84 @@ export class OpenClawGatewayClient {
       },
       { expectFinal: true, timeoutMs: 630_000 },
     );
+  }
+
+  /**
+   * Send a message to an agent with streaming support.
+   * The onDelta callback fires for each text chunk and tool event.
+   * Returns the final response when complete.
+   */
+  async sendAgentMessageStreaming(
+    message: string,
+    agentId: string | undefined,
+    sessionKey: string | undefined,
+    onDelta: StreamCallback,
+  ): Promise<{
+    runId?: string;
+    status?: string;
+    summary?: string;
+    result?: {
+      payloads?: Array<{ text?: string; mediaUrl?: string | null; mediaUrls?: string[] }>;
+      meta?: unknown;
+    };
+  }> {
+    const idempotencyKey = `ax-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = this.nextId();
+
+    // Register the stream callback before sending
+    this.streamCallbacks.set(id, onDelta);
+
+    const frame = {
+      type: "req",
+      id,
+      method: "agent",
+      params: {
+        message,
+        agentId,
+        sessionKey,
+        deliver: false,
+        timeout: 600,
+        idempotencyKey,
+      },
+    };
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.streamCallbacks.delete(id);
+      throw new Error("gateway not connected");
+    }
+
+    const timeoutMs = 630_000;
+
+    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
+      this.pending.set(id, {
+        resolve: (v) => resolve(v as Record<string, unknown>),
+        reject,
+        expectFinal: true,
+      });
+
+      setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          this.streamCallbacks.delete(id);
+          reject(new Error(`Streaming request timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+    });
+
+    this.ws.send(JSON.stringify(frame));
+
+    const result = await promise;
+    return {
+      runId: result.runId as string | undefined,
+      status: result.status as string | undefined,
+      summary: result.summary as string | undefined,
+      result: result.result as
+        | {
+            payloads?: Array<{ text?: string; mediaUrl?: string | null; mediaUrls?: string[] }>;
+            meta?: unknown;
+          }
+        | undefined,
+    };
   }
 
   /** List all configured agents */

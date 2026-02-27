@@ -1,0 +1,254 @@
+# Axtrizen AI — Feature Roadmap & Priority Plan
+
+> Based on deep research into 30+ AI coding tools (Devin, Manus, Cursor, Windsurf, VSCode Agent, etc.), 3000+ OpenClaw community skills, and your current codebase state.
+
+---
+
+## Current State Summary
+
+Your app already has a solid foundation with these **working features**:
+- ✅ Application shell (Tauri 2.0, dark theme, collapsible sidebar)
+- ✅ Dashboard (live metrics, gateway health, cost tracking)
+- ✅ Agent CRUD (create, list, settings, delete, status)
+- ✅ Chat (1:1, send/receive, markdown, history)
+- ✅ Teams (create, add/remove members, group chat with @tag orchestration)
+- ✅ Projects (create, workspace generation, details, delete)
+- ✅ Settings (theme, gateway URL, debug mode)
+- ✅ Global search, notifications, user profile
+
+---
+
+## 🔴 Tier 1: Critical Must-Have Features (Immediate Priority)
+
+These are the features that make Axtrizen a *functioning* autonomous SDLC platform rather than just a management UI. Without these, the core value proposition doesn't work.
+
+### 1. SDLC Execution Engine (The Core Differentiator)
+
+**Why it matters:** This is what separates Axtrizen from every other AI tool. Devin runs a single agent loop; Manus has a planner module + knowledge module. Axtrizen's multi-agent SDLC is unique.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Phase Orchestration** | Manager agent drives 4 phases: Planning → Design → Development → Testing. Each phase triggers specific agent behaviors | 8 pts |
+| **Plan Generation & Parsing** | Manager generates project plan as structured JSON (epics → stories → tasks). Auto-parsed and stored in DB | 5 pts |
+| **Task Assignment Engine** | Manager assigns tasks to worker agents based on role/capability. Tasks appear on the Kanban board | 5 pts |
+| **Code File Extraction** | Parse agent responses for code blocks, extract filenames, save as real files in workspace directory | 5 pts |
+| **Revision Loop** | Manager reviews each agent's work. Up to 2 rounds of revision before accepting | 3 pts |
+| **Human Feedback Gate** | Pause execution between phases. Human approves/revises before proceeding | 3 pts |
+| **Final Deliverables Report** | Generate `FINAL_REPORT.md` at completion: what was built, files created, how to run, next steps | 3 pts |
+
+> [!IMPORTANT]
+> This is the #1 priority. The entire product's value depends on this engine working end-to-end.
+
+---
+
+### 2. Project Board (Kanban + List View)
+
+**Why it matters:** Users need to *see* what the agents are doing. Every competitor (Devin, Manus) provides progress visibility. Your board is the Jira-equivalent for AI work.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Kanban View** | 5 columns: Backlog → Todo → In Progress → Review → Done. Cards show task title, assignee, priority | 5 pts |
+| **List/Tree View** | Hierarchical: Epic → Story → Task with expandable rows and progress bars | 5 pts |
+| **Real-Time Refresh** | Auto-refresh every 5 seconds + immediate refresh on `project-plan-ready` event | 2 pts |
+| **Progress Bars** | Per-epic completion percentage: [(doneTasks / totalTasks) * 100](file:///Users/akashranjan/Desktop/openclaw/research/maple-oss/maple/state/store.py#156-214) | 2 pts |
+| **Sprint Filtering** | Filter board by sprint iteration | 2 pts |
+
+---
+
+### 3. Agent-to-Agent Communication Protocol (via Maple OSS)
+
+**Why it matters:** Manus has an event stream for inter-module communication. Devin uses planning mode for coordination. Your agents need a structured way to talk to each other within a team. We will integrate **[Maple OSS](https://github.com/maheshvaikri-code/maple-oss)** directly into the OpenClaw Python environment to handle this natively.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Maple Broker Setup** | Deploy NATS or use Maple's memory broker for agent pub/sub communication | 3 pts |
+| **P2P Task Delegation** | Manager agent uses Maple `ResourceRequest` to assign tasks to workers based on capacity | 5 pts |
+| **Secure Review Protocol** | Use Maple's LIM (Link Identification Mechanism) for secure Dev ↔ QA code review loops | 3 pts |
+| **Distributed State Sync** | Use Maple's `StateManager` to keep all team agents aware of the current project phase | 3 pts |
+
+---
+
+## 🟡 Tier 2: High-Value Features (Next Sprint)
+
+These features significantly improve the user experience and make the platform feel professional.
+
+### 4. Workspace File Browser & Code Viewer
+
+**Why it matters:** Devin has a full file editor. Cursor gives you code-level access. Users need to see what the agents produced, not just read chat messages.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **File Tree Browser** | Display project workspace directory as a file tree with icons for file types | 3 pts |
+| **Code Preview** | Click a file → view with syntax highlighting (using Monaco or CodeMirror) | 5 pts |
+| **File Diff View** | Show what changed between revisions (agent edits) | 3 pts |
+| **Download/Export** | Download individual files or entire workspace as ZIP | 2 pts |
+
+---
+
+### 5. Agent Role Templates & Skill System
+
+**Why it matters:** The research shows **3,009 community-built skills** across categories like Coding Agents, Git/GitHub, DevOps, Web Dev, etc. Axtrizen should leverage this ecosystem.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Built-in Role Templates** | 10+ predefined roles: PM, Architect, Sr Developer, Jr Developer, QA Engineer, DevOps, Security Engineer, Code Reviewer, Business Analyst, Tech Lead | 3 pts |
+| **Template Preview** | Preview system prompt, suggested model, and capabilities before applying | 2 pts |
+| **Custom Templates** | Users save their own agent configs as reusable templates | 3 pts |
+| **Skill Installation** | Install OpenClaw skills from ClawHub to extend agent capabilities (CLI integration) | 5 pts |
+| **Skill Browser** | Browse/search available skills from within the app | 5 pts |
+
+---
+
+### 6. Mission Control (Multi-Agent Monitoring)
+
+**Why it matters:** When 5+ agents are working simultaneously, the user needs a bird's-eye view. Inspired by Manus's event stream and Devin's planning mode visibility.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Agent Grid** | Visual grid of agent cards showing: avatar, name, status, current task, token count | 3 pts |
+| **Activity Timeline** | Chronological log of all agent actions across the team | 5 pts |
+| **Team Swim Lanes** | Parallel lanes showing which agent is working on what, simultaneously | 5 pts |
+| **Cost Dashboard** | Running cost per agent, per project, with burn rate visualization | 3 pts |
+
+---
+
+### 7. Enhanced Chat Features
+
+**Why it matters:** Chat is the primary interface. These upgrades make it production-quality.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Chat Search** | Full-text search across all conversations | 3 pts |
+| **Message Threading** | Reply-to threading for complex conversations | 3 pts |
+| **Code Block Actions** | Copy code, save to file, run in terminal — directly from chat | 3 pts |
+| **Streaming Responses** | Show agent responses token-by-token instead of waiting for complete response | 2 pts |
+| **Chat Export** | Export conversation as Markdown or PDF | 2 pts |
+
+---
+
+## 🟢 Tier 3: Differentiation Features (v0.2+)
+
+These features make Axtrizen best-in-class and differentiate it from competitors.
+
+### 8. Git Integration & Version Control
+
+**Why it matters:** Devin creates PRs automatically. This is table-stakes for a development platform.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Auto-Commit** | Agent code changes auto-committed to project git repo with descriptive messages | 3 pts |
+| **Branch Management** | Each project/sprint gets its own branch. Manager merges when phase completes | 3 pts |
+| **PR Creation** | Auto-create GitHub/GitLab PR from agent work with summary and file list | 5 pts |
+| **Diff Viewer** | In-app diff viewer showing all changes made by agents | 3 pts |
+
+---
+
+### 9. Agent Memory & Context System
+
+**Why it matters:** Manus has a knowledge module. The community has skills like `cognitive-memory`, `chromadb-memory`, and `cloud-memory`. Long-term memory makes agents dramatically better.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Short-Term Memory** | Per-session working memory that persists within a project execution | 2 pts |
+| **Long-Term Memory** | Cross-project learnings stored in vector DB (ChromaDB or similar) | 5 pts |
+| **Shared Team Memory** | Team-level knowledge base that all agents can reference | 3 pts |
+| **Memory Inspector** | UI to browse, search, and edit agent memories | 3 pts |
+
+---
+
+### 10. External Channel Integration
+
+**Why it matters:** Real teams use Slack/Discord. Agents should be able to receive tasks and post updates there.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Slack Integration** | Bot that receives commands and posts agent updates to Slack channels | 5 pts |
+| **Discord Integration** | Same for Discord servers | 5 pts |
+| **Webhook API** | Custom webhook endpoints for external tool integration | 3 pts |
+| **Email Reports** | Scheduled email digests of project progress | 3 pts |
+
+---
+
+### 11. CI/CD Pipeline Integration
+
+**Why it matters:** Devin runs CI checks before submitting. Agents should trigger tests and deployments.
+
+| Sub-Feature | Description | Effort |
+|---|---|---|
+| **Run Tests** | Agent triggers test suite and reads results | 3 pts |
+| **Build Pipeline** | Trigger build process and report success/failure | 3 pts |
+| **Deploy Preview** | Auto-deploy staging preview from agent-generated code (like Manus's `expose_port`) | 5 pts |
+| **CI Status Board** | Dashboard showing build/test/deploy status per project | 3 pts |
+
+---
+
+### 12. Advanced Agent Capabilities (Inspired by Research)
+
+| Feature | Inspiration Source | Description | Effort |
+|---|---|---|---|
+| **Browser Automation** | Devin, Manus | Agents can browse web pages, take screenshots, interact with UIs for testing | 8 pts |
+| **Sandbox Execution** | Manus, Docker Sandbox skill | Isolated Docker containers for safe code execution | 5 pts |
+| **LSP Integration** | Devin | Go-to-definition, find-references, hover info — agents understand code structure | 8 pts |
+| **Semantic Code Search** | Devin | Natural language queries against the codebase | 5 pts |
+| **Multi-Model Support** | Cursor, Windsurf | Route different agents to different models (Claude for code, GPT-4 for planning) | 3 pts |
+
+---
+
+## 📋 Recommended Sprint Plan
+
+| Sprint | Focus | Key Deliverables |
+|---|---|---|
+| **Sprint 1** (Current) | 🔴 SDLC Engine Core | Phase orchestration, plan generation, task assignment, human feedback gate |
+| **Sprint 2** | 🔴 Board + File Extraction | Kanban/List board, code file extraction from agent responses, workspace file browser |
+| **Sprint 3** | 🟡 Agent Communication | Structured message types, review protocol, agent role templates |
+| **Sprint 4** | 🟡 Mission Control + Chat | Multi-agent monitoring, chat search, code block actions |
+| **Sprint 5** | 🟢 Git + Memory | Auto-commit, branch management, short-term & long-term memory |
+| **Sprint 6** | 🟢 Integrations | Slack/Discord, CI/CD pipeline, deploy preview |
+
+---
+
+## 🧠 Key Insights from Research
+
+### What Competitors Do That Axtrizen Should Learn From
+
+| Competitor | Key Strength | Axtrizen Advantage |
+|---|---|---|
+| **Devin** | Full-stack autonomy with planning/execution modes, LSP, browser, deployment | Axtrizen has *multi-agent teams* — Devin is solo |
+| **Manus** | Modular architecture (Planner, Knowledge, Datasource modules), todo.md tracking | Axtrizen has *project management* (epics, stories, tasks) |
+| **Cursor** | IDE-native with inline code suggestions, multi-file edits | Axtrizen orchestrates *entire SDLC*, not just coding |
+| **Windsurf** | Context awareness, "Cascade" multi-step flows | Axtrizen has *human-in-the-loop* at phase transitions |
+
+### What Makes Axtrizen Unique (Lean Into This)
+
+1. **Multi-Agent Team Structure** — No competitor has Manager + Worker hierarchy with automatic orchestration
+2. **Full SDLC Coverage** — Not just coding, but Planning → Design → Development → Testing → Deployment
+3. **Jira-like Project Management** — Epics, Stories, Tasks, Sprints with a real Kanban board
+4. **Human Oversight at Scale** — Phase gates ensure humans approve before moving forward
+5. **Desktop-Native Performance** — Tauri 2.0 means fast, local, no cloud dependency for the core app
+
+### Skill Ecosystem Opportunities
+
+The OpenClaw skills registry has 3,009+ skills — key categories for Axtrizen:
+
+| Category | Count | Relevance |
+|---|---|---|
+| Coding Agents & IDEs | 133 | Direct agent capabilities |
+| Git & GitHub | 66 | Version control automation |
+| DevOps & Cloud | 212 | Deployment & infrastructure |
+| Browser & Automation | 139 | Testing & web interaction |
+| Search & Research | 253 | Information gathering agents |
+| CLI Utilities | 131 | System tool access |
+| AI & LLMs | 287 | Model routing, memory, context |
+
+> [!TIP]
+> Consider building a **Skill Marketplace** inside Axtrizen where users can browse and install skills for their agents — similar to VS Code Extensions or Chrome Web Store.
+
+---
+
+## Questions for Your Decision
+
+1. **Sprint 1 scope** — Should we focus *exclusively* on the SDLC Engine, or include the Kanban Board alongside it?
+2. **Skill system** — How deep should OpenClaw skill integration go? Simple installation, or a full marketplace with ratings/reviews?
+3. **Git integration** — Is this a priority for v0.1, or can it wait for v0.2?
+4. **External channels** — Slack/Discord: important for launch, or post-launch?
+5. **Memory system** — Start with simple per-project memory, or go straight to vector DB-backed long-term memory?

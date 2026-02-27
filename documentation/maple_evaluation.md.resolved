@@ -1,0 +1,40 @@
+# Maple OSS Integration Evaluation
+
+## 1. What is Maple OSS?
+[Maple OSS](https://github.com/maheshvaikri-code/maple-oss) is a Python-based, production-ready Multi-Agent Protocol Language Engine. It provides a robust, typed framework for agents to communicate with each other.
+
+**Key Features Discovered During Code Audit:**
+- **Rock-Solid Core:** 100% Python-typed codebase (`Result[T, E]` pattern for error handling eliminating silent failures).
+- **Resource-Aware Negotiation:** Built-in message protocols for agents to negotiate CPU/Memory/Network requirements.
+- **Link Identification Mechanism (LIM):** Cryptographically secure messaging between specific agents.
+- **Distributed State Sync:** Built-in `StateManager` with memory, Redis, and File backends for global state synchronization.
+- **Broker Support:** Ships with an in-memory broker for testing, and a production **NATS broker implementation**.
+
+## 2. Can We Use It In Our Project?
+**YES, absolutely.** 
+Axtrizen AI currently relies on Rust parsing JSON from LLMs to manage the SDLC state. While effective for top-down orchestration, it lacks a standard way for the actual Python agents (running in OpenClaw) to talk to *each other* peer-to-peer (e.g., a Developer agent asking a QA agent for a review before pushing code). 
+
+Maple OSS perfectly fills the **"Sprint 3: Agent Communication Protocol"** gap in our roadmap.
+
+## 3. How to Integrate Maple OSS (The Integration Plan)
+
+We should integrate Maple OSS at the **OpenClaw (Python) layer**, while keeping Axtrizen's Rust backend as the high-level SDLC state machine.
+
+### Architecture Flow:
+1. **NATS Server:** Deploy a lightweight NATS server alongside Axtrizen (or use Maple's in-memory broker initially).
+2. **OpenClaw Python Agents:** When OpenClaw spawns a Worker or Manager agent, it initializes a `maple.Agent` instance connected to the broker.
+3. **The Protocol:**
+   - Axtrizen (Rust) sends the high-level Epic/Story JSON to the **Manager Agent**.
+   - The Manager Agent uses **Maple OSS** to broadcast an `INTELLIGENT_TASK` message to the Development team.
+   - Developer Agents use Maple's **Resource Negotiation** to claim the task based on their current token load/availability.
+   - Developer Agents execute skills (reading/writing files) and send a `CODE_REVIEW_REQUEST` message via Maple to the Reviewer Agent.
+   - The Reviewer Agent sends feedback back via Maple's secure LIM channel.
+   - Once all Maple-based P2P coordination is done, the Manager Agent reports success back to Axtrizen (Rust), which updates the UI Board and advances the SDLC phase.
+
+### Immediate Next Steps for Integration:
+1. **Add `maple-oss` to OpenClaw dependencies:** `pip install maple-oss` inside your Python worker environments.
+2. **Write a Maple Adapter for OpenClaw:** Create a wrapper that connects OpenClaw's existing LLM execution loop to `maple.Agent` endpoints.
+3. **Update Axtrizen Gateway:** Allow the Axtrizen Rust Gateway to listen to Maple state changes to reflect real-time agent peer-to-peer chatter in the frontend "Mission Control" UI.
+
+## 4. Conclusion
+Integrating Maple OSS will save us from writing a custom WebSocket/P2P routing protocol from scratch in Python for the agents. It is highly recommended we adopt it for Tier 1: Sprint 3. I have updated the Feature Roadmap to include it.

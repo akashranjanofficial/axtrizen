@@ -18,6 +18,13 @@ import { AgentMemory } from "./agents/AgentMemory";
 import { AgentOverview } from "./agents/AgentOverview";
 import { AgentSettings } from "./agents/AgentSettings";
 import { AgentTerminal, clearAgentOnboarding } from "./agents/AgentTerminal";
+import { RoleTemplatePicker } from "./agents/RoleTemplatePicker";
+import { UnifiedSkillsTab } from "./agents/UnifiedSkillsTab";
+import { ContextHealthBar } from "./agents/ContextHealthBar";
+import { AgentScorecard } from "./agents/AgentScorecard";
+import { AgentCreationWizard } from "./AgentCreationWizard";
+import { type RoleTemplate } from "../data/role-templates";
+import { agentSkillsBatchInstall, type InstallSkillRequest } from "../tauri-api";
 import { killPtySession } from "./TerminalComponent";
 
 export type { Agent } from "../stores/agent-store";
@@ -61,14 +68,33 @@ function CreateAgentModal({
   const [type, setType] = useState<"worker" | "manager">("worker");
   const [acceptedRisk, setAcceptedRisk] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+
+  const handleTemplateSelect = (template: RoleTemplate) => {
+    setSelectedTemplateId(template.id);
+    setName(template.name);
+    setRole(template.tagline);
+    setType(template.agentType);
+  };
+
+  const handleTemplateClear = () => {
+    setSelectedTemplateId(null);
+  };
 
   const handleInitialize = async () => {
     if (!name.trim() || !folderPath.trim() || !acceptedRisk) {
       return;
     }
     setIsInitializing(true);
-    await onInitialize(name, role, folderPath, type, acceptedRisk);
-    setIsInitializing(false);
+    // onInitialize may close the modal (unmount this component),
+    // so don't set state afterward — React 18 batches this safely
+    // but the catch below prevents stale-state warnings
+    try {
+      await onInitialize(name, role, folderPath, type, acceptedRisk);
+    } catch {
+      // If creation fails, the modal stays open — re-enable button
+      setIsInitializing(false);
+    }
   };
 
   return (
@@ -84,6 +110,13 @@ function CreateAgentModal({
         <h2 className="text-xl font-bold text-foreground mb-4">Create New Agent</h2>
 
         <div className="space-y-4">
+          {/* Role Template Picker */}
+          <RoleTemplatePicker
+            selectedTemplateId={selectedTemplateId}
+            onSelect={handleTemplateSelect}
+            onClear={handleTemplateClear}
+          />
+
           <div>
             <label className="block text-sm text-muted-foreground mb-1">Agent Name</label>
             <input
@@ -268,17 +301,23 @@ function DeleteConfirmationModal({
 export function AgentsView() {
   const [agents, setAgents] = useState<Agent[]>(agentStore.getAgents());
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
-  const [activeTab, setActiveTab] = useState<"overview" | "terminal" | "memory" | "settings">(
+  const [activeTab, setActiveTab] = useState<"overview" | "terminal" | "memory" | "settings" | "skills" | "scorecard">(
     "overview",
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [agentToDelete, setAgentToDelete] = useState<Agent | null>(null);
 
-  // Sync with persistent store
+  // Sync with persistent store — also refresh the selected agent's data
   useEffect(() => {
     const unsub = agentStore.subscribe(() => {
-      setAgents(agentStore.getAgents());
+      const latest = agentStore.getAgents();
+      setAgents(latest);
+      setSelectedAgent((prev) => {
+        if (!prev) return null;
+        const updated = latest.find((a) => a.id === prev.id);
+        return updated ?? null;
+      });
     });
     return unsub;
   }, []);
@@ -312,10 +351,50 @@ export function AgentsView() {
     }
   };
 
+  /** Wizard-aware initializer — creates agent then batch-installs skills */
+  const handleWizardInitialize = async (
+    name: string,
+    role: string,
+    workingDir: string,
+    type: "worker" | "manager",
+    acceptedRisk: boolean,
+    skills: InstallSkillRequest[],
+  ) => {
+    try {
+      await agentStore.addAgent(name, role, workingDir, type, acceptedRisk);
+      activityStore.addEvent(
+        name,
+        `was created as a ${type} and started initializing`,
+        "success",
+        "Dev",
+      );
+
+      // Batch-install selected skills for the new agent
+      if (skills.length > 0) {
+        const latest = agentStore.getAgents();
+        const newAgent = latest.find((a) => a.name === name);
+        if (newAgent) {
+          try {
+            await agentSkillsBatchInstall(newAgent.id, skills);
+          } catch (skillErr) {
+            console.warn("Skills install partially failed:", skillErr);
+          }
+        }
+      }
+
+      setShowCreateAgent(false);
+    } catch (e) {
+      console.error("Failed to create agent:", e);
+      alert("Failed to create agent. See console for details.");
+    }
+  };
+
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "terminal", label: "Terminal" },
     { id: "memory", label: "Memory" },
+    { id: "skills", label: "Skills" },
+    { id: "scorecard", label: "Scorecard" },
     { id: "settings", label: "Settings" },
   ] as const;
 
@@ -323,9 +402,9 @@ export function AgentsView() {
     <div className="h-[calc(100vh-73px)] overflow-hidden flex">
       {/* Render Modal */}
       {showCreateAgent && (
-        <CreateAgentModal
+        <AgentCreationWizard
           onClose={() => setShowCreateAgent(false)}
-          onInitialize={handleInitialize}
+          onInitialize={handleWizardInitialize}
         />
       )}
 
@@ -479,6 +558,10 @@ export function AgentsView() {
                     <span>|</span>
                     <span>⏳ Task: {selectedAgent.currentTask}</span>
                   </div>
+                  {/* Context health — compact bar below agent info */}
+                  <div className="mt-2 max-w-xs">
+                    <ContextHealthBar agentId={selectedAgent.id} compact />
+                  </div>
                 </div>
               </div>
 
@@ -592,6 +675,20 @@ export function AgentsView() {
             {activeTab === "memory" && (
               <div className="h-full overflow-y-auto">
                 <AgentMemory agent={selectedAgent} />
+              </div>
+            )}
+            {activeTab === "skills" && (
+              <div className="h-full overflow-y-auto p-4">
+                <UnifiedSkillsTab
+                  agentId={selectedAgent.id}
+                  agentRole={selectedAgent.role}
+                  agentName={selectedAgent.name}
+                />
+              </div>
+            )}
+            {activeTab === "scorecard" && (
+              <div className="h-full overflow-y-auto p-4">
+                <AgentScorecard />
               </div>
             )}
             {activeTab === "settings" && (

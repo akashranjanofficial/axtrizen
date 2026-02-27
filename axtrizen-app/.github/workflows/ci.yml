@@ -1,0 +1,166 @@
+name: Axtrizen CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─── Rust Backend ───────────────────────────────────────────
+  rust-check:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: axtrizen-app/src-tauri
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: axtrizen-app/src-tauri
+
+      # Linux needs system libs for Tauri / WebKit
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      - name: cargo fmt --check
+        run: cargo fmt -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features
+
+  # ─── Frontend ───────────────────────────────────────────────
+  frontend-check:
+    name: Frontend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: axtrizenFrontEnd
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type-check
+        run: npx tsc --noEmit
+
+      - name: Vitest (unit + integration)
+        run: npx vitest run --reporter=verbose
+
+      - name: Vite build
+        run: npm run build
+
+  # ─── Tauri Build (smoke) ────────────────────────────────────
+  tauri-build:
+    name: Tauri Build (${{ matrix.os }})
+    needs: [rust-check, frontend-check]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: axtrizen-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: axtrizen-app/src-tauri
+
+      # Linux system deps
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      # Frontend deps
+      - name: Install frontend dependencies
+        working-directory: axtrizenFrontEnd
+        run: npm ci
+
+      # Tauri deps
+      - name: Install Tauri CLI
+        run: npm ci
+
+      # Build (debug mode for CI speed)
+      - name: Tauri build (debug)
+        run: npx tauri build --debug
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ""
+
+      # Upload bundles
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axtrizen-${{ matrix.os }}
+          path: |
+            axtrizen-app/src-tauri/target/debug/bundle/**/*
+          if-no-files-found: warn
+          retention-days: 7

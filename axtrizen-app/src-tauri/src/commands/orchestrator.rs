@@ -89,10 +89,26 @@ pub async fn start_project_execution(
         return Err("Team has no worker agents (only a manager). Add at least one more agent.".to_string());
     }
 
+    // Determine resume phase: if project has an active/paused phase, resume from there
+    let resume_from_phase = {
+        let phase = project.phase.as_str();
+        let status = project.status.as_str();
+        // Resume if the project was previously active/paused (not completed, not fresh)
+        if (status == "active" || status == "paused" || status == "error")
+            && !phase.is_empty()
+            && phase != "requirements"
+            && phase != "completed"
+        {
+            Some(phase.to_string())
+        } else {
+            None
+        }
+    };
+
     // Clone the gateway for the background task
     let gateway_clone = gateway.clone_for_task();
 
-    // Start execution
+    // Start execution (with optional resume)
     orchestrator::start_execution(
         app,
         gateway_clone,
@@ -104,11 +120,14 @@ pub async fn start_project_execution(
         manager_id.clone(),
         manager_name,
         agents,
+        resume_from_phase.clone(),
+        None, // no feedback context for normal start/resume
     ).await;
 
     Ok(json!({
-        "status": "started",
+        "status": if resume_from_phase.is_some() { "resumed" } else { "started" },
         "projectId": project_id,
+        "resumeFromPhase": resume_from_phase,
     }))
 }
 
@@ -181,4 +200,110 @@ pub async fn resume_project_execution(
     } else {
         Err("No waiting execution found for this project. It may have already completed or not be in a feedback-waiting state.".to_string())
     }
+}
+
+/// Restart a completed project with user feedback for revisions.
+/// Resets the project from "completed" and re-runs execution with feedback injected as context.
+#[tauri::command]
+pub async fn restart_with_feedback(
+    project_id: String,
+    feedback: String,
+    restart_from_phase: Option<String>,
+    app: tauri::AppHandle,
+    gateway: tauri::State<'_, GatewayClient>,
+    orchestrator_state: tauri::State<'_, Arc<OrchestratorState>>,
+) -> Result<Value, String> {
+    // Check if already running
+    {
+        let running = orchestrator_state.running.read().await;
+        if let Some(state) = running.get(&project_id) {
+            let s = state.lock().await;
+            if s.status == "running" {
+                return Err("Project execution is already running".to_string());
+            }
+        }
+    }
+
+    // Fetch project from DB
+    let conn = db::init_db().map_err(|e| e.to_string())?;
+    let projects = db::get_all_projects(&conn).map_err(|e| e.to_string())?;
+    let project = projects.iter().find(|p| p.id == project_id)
+        .ok_or_else(|| "Project not found".to_string())?;
+
+    let team_id = project.team_id.as_ref()
+        .ok_or_else(|| "No team assigned to this project.".to_string())?;
+
+    // Fetch team and manager
+    let teams = db::get_all_teams(&conn).map_err(|e| e.to_string())?;
+    let team = teams.iter().find(|t| t.id == *team_id)
+        .ok_or_else(|| "Team not found".to_string())?;
+
+    let manager_id = team.manager_id.as_ref()
+        .ok_or_else(|| "No manager assigned to the team.".to_string())?;
+
+    // Fetch team members
+    let members = db::get_team_members(&conn, team_id).map_err(|e| e.to_string())?;
+    if members.is_empty() {
+        return Err("Team has no members.".to_string());
+    }
+
+    // Resolve agent names from Gateway
+    let agents_result = gateway.call("agents.list", json!({})).await?;
+    let gateway_agents = agents_result.get("agents")
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut agent_name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for agent in &gateway_agents {
+        let id = agent.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let identity = agent.get("identity");
+        let name = agent.get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| identity.and_then(|i| i.get("name")).and_then(|v| v.as_str()))
+            .unwrap_or(id);
+        agent_name_map.insert(id.to_string(), name.to_string());
+    }
+
+    let manager_name = agent_name_map.get(manager_id)
+        .cloned()
+        .unwrap_or_else(|| manager_id.clone());
+
+    let agents: Vec<orchestrator::AgentInfo> = members.iter()
+        .filter(|m| m.agent_id != *manager_id)
+        .map(|m| orchestrator::AgentInfo {
+            id: m.agent_id.clone(),
+            name: agent_name_map.get(&m.agent_id)
+                .cloned()
+                .unwrap_or_else(|| m.agent_id.clone()),
+        })
+        .collect();
+
+    if agents.is_empty() {
+        return Err("Team has no worker agents.".to_string());
+    }
+
+    let gateway_clone = gateway.clone_for_task();
+
+    orchestrator::restart_with_feedback(
+        app,
+        gateway_clone,
+        Arc::clone(&orchestrator_state),
+        project_id.clone(),
+        project.name.clone(),
+        project.description.clone(),
+        team_id.clone(),
+        manager_id.clone(),
+        manager_name,
+        agents,
+        feedback.clone(),
+        restart_from_phase.clone(),
+    ).await;
+
+    Ok(json!({
+        "status": "restarted_with_feedback",
+        "projectId": project_id,
+        "feedback": feedback,
+        "restartFromPhase": restart_from_phase,
+    }))
 }

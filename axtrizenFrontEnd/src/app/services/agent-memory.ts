@@ -188,3 +188,35 @@ export function extractMemoryUpdates(
 
   return { updated, cleanText };
 }
+
+/**
+ * Auto-memorize a conversation to memU's long-term memory.
+ *
+ * Call this when a conversation session ends (e.g., user navigates away,
+ * session is compacted, or after N messages). The conversation transcript
+ * is sent to memU for extraction and embedding.
+ */
+export async function autoMemorizeConversation(
+  agentId: string,
+  conversationMessages: Array<{ role: string; content: string }>,
+): Promise<void> {
+  if (!conversationMessages.length) return;
+
+  try {
+    // Lazy import to avoid circular deps
+    const { default: vectorMemory } = await import("./vector-memory");
+
+    // Format messages into a transcript
+    const transcript = conversationMessages
+      .map((msg) => `[${msg.role.toUpperCase()}]: ${msg.content}`)
+      .join("\n\n");
+
+    await vectorMemory.memorize(transcript, "conversation", agentId);
+    console.log(
+      `[AgentMemory] Auto-memorized ${conversationMessages.length} messages for agent ${agentId}`,
+    );
+  } catch (err) {
+    // Non-fatal — don't break the session if memU is unavailable
+    console.warn("[AgentMemory] Auto-memorize failed:", err);
+  }
+}
