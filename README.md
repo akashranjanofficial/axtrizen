@@ -1,5 +1,4 @@
-# 🦞 OpenClaw — Personal AI Assistant
-
+# 🦞 AXtrixen = OpenClaw  Rapper works same as openclaw - Imagine 100 + agent taling to each other and doing job and has access to there machine
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text-dark.png">
